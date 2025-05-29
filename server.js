@@ -27,45 +27,49 @@ app.use(cors());
 
 // --- ENDPOINT PARA VALIDAR EL CORREO ELECTRÓNICO CON FAUCETPAY ---
 app.post('/api/validate-faucetpay-email', async (req, res) => {
-    const { email } = req.body; 
+    const { email } = req.body;
 
     if (!email) {
         return res.status(400).json({ success: false, message: 'Email es requerido.' });
     }
 
     try {
-        // --- LLAMADA A LA API DE FAUCETPAY PARA VALIDAR EL CORREO ---
-        // **POR FAVOR, REEMPLAZA ESTO CON LA INFORMACIÓN REAL DE LA API DE FAUCETPAY**
-        const faucetPayResponse = await fetch('https://faucetpay.io/api/v1/checkaddress', { // <-- ¡ESTA URL ES UN EJEMPLO! ¡CAMBIA!
+        const FAUCETPAY_API_URL = 'https://faucetpay.io/api/v1/checkaddress'; // Esta URL es correcta
+
+        // Construir el body como URL-encoded form data
+        const formData = new URLSearchParams();
+        formData.append('api_key', FAUCETPAY_API_KEY);
+        formData.append('address', email); // <-- ¡CORREGIDO: 'address' en lugar de 'email'!
+        formData.append('currency', FAUCETPAY_CURRENCY); // Opcional, pero bueno incluirlo si aplica
+
+        const faucetPayResponse = await fetch(FAUCETPAY_API_URL, {
             method: 'POST',
+            // --- ¡IMPORTANTE! Cambiado el Content-Type y el body ---
             headers: {
-                'Content-Type': 'application/json',
+                'Content-Type': 'application/x-www-form-urlencoded', // <-- ¡CORREGIDO!
             },
-            body: JSON.stringify({
-                api_key: FAUCETPAY_API_KEY, 
-                email: email,               
-            })
+            body: formData, // <-- ¡Ahora es formData, no JSON.stringify!
         });
 
-        const faucetPayData = await faucetPayResponse.json(); 
-        
-        // EJEMPLO DE RESPUESTA ESPERADA (ADAPTA ESTO A LO REAL DE FAUCETPAY):
-        if (faucetPayData.status === 'success' || faucetPayData.valid_email === true) { 
-            res.json({ success: true, message: 'Correo electrónico validado con éxito en FaucetPay.' });
+        const faucetPayData = await faucetPayResponse.json();
+
+        console.log("Respuesta de FaucetPay:", faucetPayData); // Asegúrate de que esto se imprime en los logs de Render
+
+        // La lógica para manejar la respuesta de FaucetPay basada en tu documentación
+        // La documentación muestra 'status: 200' para éxito y 'status: 456' para no encontrado.
+        if (faucetPayData.status === 200) {
+            res.json({ success: true, message: 'Correo electrónico validado con éxito en FaucetPay.', user_hash: faucetPayData.payout_user_hash });
+        } else if (faucetPayData.status === 456) {
+            res.status(400).json({ success: false, message: faucetPayData.message || 'El correo electrónico no pertenece a ningún usuario de FaucetPay.' });
         } else {
-            console.error('Error de FaucetPay al validar correo:', faucetPayData.message || 'Error desconocido');
-            res.status(400).json({ success: false, message: faucetPayData.message || 'El correo electrónico no está registrado o vinculado a FaucetPay.' });
+            console.error('Error de FaucetPay al validar correo (otro estado):', faucetPayData.message || 'Error desconocido');
+            res.status(500).json({ success: false, message: faucetPayData.message || 'Error desconocido de FaucetPay.' });
         }
 
     } catch (error) {
         console.error('Error interno del servidor al validar el correo:', error);
         res.status(500).json({ success: false, message: 'Error interno del servidor al validar el correo.' });
     }
-});
-
-// --- ENDPOINT PARA PROCESAR EL RETIRO (SE HARA EN UN PASO FUTURO) ---
-app.post('/api/request-faucetpay-withdrawal', (req, res) => {
-    res.status(200).json({ success: false, message: "Funcionalidad de retiro aún no implementada." });
 });
 
 
