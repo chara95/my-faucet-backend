@@ -88,11 +88,74 @@ app.post('/api/validate-faucetpay-email', async (req, res) => {
     }
 });
 
-// --- ENDPOINT PARA PROCESAR EL RETIRO (SE HARA EN UN PASO FUTURO) ---
-app.post('/api/request-faucetpay-withdrawal', (req, res) => {
-    res.status(200).json({ success: false, message: "Funcionalidad de retiro aún no implementada." });
-});
+// --- ENDPOINT PARA PROCESAR EL RETIRO ---
+app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
+    // Asegúrate de que el frontend envíe el email/dirección y el monto
+    const { email, amount } = req.body;
 
+    if (!email || !amount) {
+        return res.status(400).json({ success: false, message: 'Email/dirección y monto son requeridos para el retiro.' });
+    }
+
+    // Convertir el monto a la unidad más pequeña (ej: satoshis para BTC, o litoshis para LTC)
+    // Asumiendo que tu frontend envía el monto en la unidad principal (ej: 0.001 BTC)
+    // FAUCETPAY_CURRENCY ya está definido como 'LTC'
+    let amountInSmallestUnit;
+    if (FAUCETPAY_CURRENCY === 'LTC') {
+        // Para LTC, el factor es 10^8 (1 LTC = 100,000,000 litoshis)
+        amountInSmallestUnit = Math.round(parseFloat(amount) * 100_000_000);
+    } else if (FAUCETPAY_CURRENCY === 'BTC') {
+        // Para BTC, el factor es 10^8 (1 BTC = 100,000,000 satoshis)
+        amountInSmallestUnit = Math.round(parseFloat(amount) * 100_000_000);
+    } else {
+        return res.status(400).json({ success: false, message: 'Moneda no soportada para el retiro.' });
+    }
+
+    try {
+        const FAUCETPAY_SEND_URL = 'https://faucetpay.io/api/v1/send';
+
+        const formData = new URLSearchParams();
+        formData.append('api_key', FAUCETPAY_API_KEY);
+        formData.append('to', email); // O 'address' si es una dirección de billetera directa
+        formData.append('amount', amountInSmallestUnit); // Monto en la unidad más pequeña
+        formData.append('currency', FAUCETPAY_CURRENCY);
+        // formData.append('referral', 'false'); // Opcional: si no es un pago de referencia
+        // formData.append('ip_address', req.ip); // Opcional: Esto puede ser complicado en Render, Render asigna IPs.
+
+        const response = await fetch(FAUCETPAY_SEND_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: formData,
+        });
+
+        const faucetPayData = await response.json();
+
+        console.log("Respuesta de FaucetPay (envío):", faucetPayData);
+
+        // Manejar la respuesta de FaucetPay
+        if (faucetPayData.status === 200 && faucetPayData.message === "OK") {
+            res.json({
+                success: true,
+                message: 'Retiro procesado con éxito.',
+                payout_id: faucetPayData.payout_id,
+                balance: faucetPayData.balance // Si quieres mostrar el nuevo balance en tu frontend
+            });
+        } else {
+            // Manejar errores específicos de FaucetPay
+            console.error('Error de FaucetPay al procesar retiro:', faucetPayData.message || 'Error desconocido');
+            res.status(400).json({
+                success: false,
+                message: faucetPayData.message || 'Error al procesar el retiro.'
+            });
+        }
+
+    } catch (error) {
+        console.error('Error interno del servidor al procesar el retiro:', error);
+        res.status(500).json({ success: false, message: 'Error interno del servidor al procesar el retiro.' });
+    }
+});
 
 // Inicia el servidor Express
 app.listen(PORT, () => {
