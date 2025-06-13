@@ -12,9 +12,8 @@ import admin from 'firebase-admin'; // <<-- NUEVO: Importación de Firebase Admi
 
 const app = express();
 const PORT = process.env.PORT || 3001; // Usando el puerto 3001, como ya lo tienes configurado
-
-// --- Recupera tu API Key de FaucetPay de las variables de entorno ---
 const FAUCETPAY_API_KEY = process.env.FAUCETPAY_API_KEY;
+const FAUCETPAY_CURRENCY = 'LTC'; // La moneda que vas a usar para validación/pagos
 
 // Asegúrate de que la API Key esté configurada
 if (!FAUCETPAY_API_KEY || FAUCETPAY_API_KEY === 'TU_API_KEY_REAL_DE_FAUCETPAY_AQUI') {
@@ -23,19 +22,14 @@ if (!FAUCETPAY_API_KEY || FAUCETPAY_API_KEY === 'TU_API_KEY_REAL_DE_FAUCETPAY_AQ
     process.exit(1); // Sale de la aplicación si la clave no está configurada
 }
 
-const FAUCETPAY_CURRENCY = 'LTC'; // La moneda que vas a usar para validación/pagos
 
-// --- NUEVO: CONFIGURACIÓN DE FIREBASE ADMIN SDK ---
-// ¡IMPORTANTE! Es altamente recomendado usar variables de entorno para las credenciales en producción (Render).
-// Para obtener estas credenciales, descarga tu Service Account Key JSON de Firebase:
-// Configuración del proyecto -> Cuentas de servicio -> Generar nueva clave privada.
-// Luego, copia las propiedades de ese JSON a variables de entorno en Render.
+
+// --- CONFIGURACIÓN DE FIREBASE ADMIN SDK ---
+
 const serviceAccount = {
   "type": process.env.FIREBASE_TYPE,
   "project_id": process.env.FIREBASE_PROJECT_ID,
   "private_key_id": process.env.FIREBASE_PRIVATE_KEY_ID,
-  // La clave privada viene con \n, asegúrate de que Render la lea correctamente.
-  // Podrías necesitar reemplazar \\n por \n si la variable de entorno lo codifica.
   "private_key": process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
   "client_email": process.env.FIREBASE_CLIENT_EMAIL,
   "client_id": process.env.FIREBASE_CLIENT_ID,
@@ -68,9 +62,16 @@ try {
 const db = admin.database();
 // --- FIN NUEVO: CONFIGURACIÓN DE FIREBASE ADMIN SDK ---
 
+const REFERRED_USER_REWARD_AMOUNT = 0.00000200; // Ejemplo: 200 Litoshis (0.000002 LTC) para el que es referido
+const REFERRER_REWARD_AMOUNT = 0.00000200;     // Ejemplo: 200 Litoshis (0.000002 LTC) para el referente
+
 // Configuración de middlewares
 app.use(express.json()); // Middleware para parsear bodies de solicitud JSON
 app.use(cors());
+
+
+
+
 
 // --- ENDPOINT PARA VALIDAR EL CORREO ELECTRÓNICO CON FAUCETPAY ---
 app.post('/api/validate-faucetpay-email', async (req, res) => {
@@ -182,11 +183,8 @@ app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
         const formData = new URLSearchParams();
         formData.append('api_key', FAUCETPAY_API_KEY);
         formData.append('to', email);
-        formData.append('amount', amountInSmallestUnit); // ¡Importante! Aquí enviamos el monto en Litoshis/Satoshis.
+        formData.append('amount', amountInSmallestUnit); 
         formData.append('currency', FAUCETPAY_CURRENCY);
-        // 7. MODIFICADO/AÑADIDO: 'alt_payid' es un parámetro opcional de FaucetPay. 
-        // Usamos el userId del usuario para poder rastrear este pago específico en tu historial de FaucetPay.
-        formData.append('alt_payid', userId); 
 
         const faucetPayResponse = await fetch(FAUCETPAY_SEND_URL, {
             method: 'POST',
@@ -253,102 +251,112 @@ app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
     }
 });
 
-// --- NUEVO: ENDPOINT: /api/apply-referral ---
-// Este endpoint es llamado por tu aplicación móvil cuando un usuario intenta aplicar un código de referido.
-app.post('/api/apply-referral', async (req, res) => {
-    const { referrerCode, referredUserUid, referralRewardAmount, source } = req.body;
+// --- NUEVO/MODIFICADO: ENDPOINT: /api/apply-referral-code ---
+// Este endpoint es llamado cuando un usuario intenta aplicar un código de referido manualmente.
+app.post('/api/apply-referral-code', async (req, res) => {
+    const { referralCode, userId } = req.body;
 
     // 1. Validación inicial de los datos recibidos
-    if (!referrerCode || !referredUserUid || referralRewardAmount === undefined) {
-        console.error('Error: Faltan parámetros en la petición /api/apply-referral.');
-        return res.status(400).json({ success: false, message: 'Parámetros incompletos.' });
+    if (!referralCode || !userId) {
+        console.error('Error: Faltan parámetros en la petición /api/apply-referral-code.');
+        return res.status(400).json({ success: false, message: 'Código de referido y ID de usuario son requeridos.' });
     }
 
     try {
-        // 2. Buscar al usuario referente (el que dio el código)
-        const referrerSnapshot = await db.ref('users')
-            .orderByChild('referralCode')
-            .equalTo(referrerCode)
-            .limitToFirst(1)
-            .once('value');
-
-        if (!referrerSnapshot.exists()) {
-            console.warn(`Intento de referido con código no válido: ${referrerCode}`);
-            return res.status(400).json({ success: false, message: 'Código de referido no válido.' });
-        }
-
-        const referrerUid = Object.keys(referrerSnapshot.val())[0];
-
-        // 3. Verificar al usuario referido (el que usó el código)
-        const referredUserRef = db.ref('users').child(referredUserUid);
+        // 2. Obtener los datos del usuario que intenta aplicar el código (el "referido")
+        const referredUserRef = db.ref('users').child(userId);
         const referredUserSnapshot = await referredUserRef.once('value');
         const referredUserData = referredUserSnapshot.val();
 
         if (!referredUserData) {
-            console.error(`Error: Usuario referido no encontrado para UID: ${referredUserUid}`);
-            return res.status(404).json({ success: false, message: 'Usuario referido no encontrado.' });
+            console.error(`Error: Usuario referido no encontrado para UID: ${userId}`);
+            return res.status(404).json({ success: false, message: 'Usuario actual no encontrado.' });
         }
 
-        // Prevenir auto-referido
-        if (referredUserUid === referrerUid) {
-            console.warn(`Intento de auto-referido por UID: ${referredUserUid}`);
+        // Validación: El usuario ya ha sido referido o ya ha reclamado una recompensa de referido.
+        if (referredUserData.referredByCode || referredUserData.referralClaimed) {
+            console.warn(`Usuario ${userId} ya ha sido referido o ya reclamó recompensa.`);
+            return res.status(400).json({ success: false, message: 'Ya has utilizado un código de referido o ya reclamaste la recompensa.' });
+        }
+        
+        // 3. Buscar al usuario referente (el que posee el código de referido)
+        const referrerSnapshot = await db.ref('users')
+            .orderByChild('referralCode')
+            .equalTo(referralCode)
+            .limitToFirst(1)
+            .once('value');
+
+        if (!referrerSnapshot.exists()) {
+            console.warn(`Intento de referido con código no válido: ${referralCode}`);
+            return res.status(400).json({ success: false, message: 'Código de referido no válido.' });
+        }
+
+        // Obtener el UID del usuario referente
+        const referrerUid = Object.keys(referrerSnapshot.val())[0];
+        const referrerData = referrerSnapshot.val()[referrerUid]; // Datos del usuario referente
+
+        // Validación: Prevenir auto-referido
+        if (userId === referrerUid) {
+            console.warn(`Intento de auto-referido por UID: ${userId}`);
             return res.status(400).json({ success: false, message: 'No puedes referirte a ti mismo.' });
         }
 
-        // Prevenir que un usuario sea referido múltiples veces
-        if (referredUserData.referredByCode || referredUserData.referralClaimed) {
-            console.warn(`Usuario ${referredUserUid} ya ha sido referido o reclamó recompensa.`);
-            return res.status(400).json({ success: false, message: 'Ya has utilizado un código de referido o ya reclamaste la recompensa.' });
-        }
-
-        // 4. Aplicar las recompensas usando una transacción para asegurar la atomicidad
+        // 4. Aplicar las recompensas utilizando una transacción para asegurar la atomicidad
+        // Usamos una transacción en la raíz o en los nodos de usuario relevantes para bloquearlos durante la actualización.
+        // Esto previene condiciones de carrera si varios usuarios intentan actualizar balances al mismo tiempo.
         await db.ref('/').transaction(currentData => {
             if (currentData) {
-                // Asegurarse de que las estructuras existen antes de intentar acceder a ellas
+                // Asegurarse de que los nodos de usuarios existen
                 if (!currentData.users) {
                     currentData.users = {};
                 }
+
+                // --- Actualizar el usuario referido (el que aplicó el código) ---
+                if (currentData.users[userId]) {
+                    currentData.users[userId].balance = (currentData.users[userId].balance || 0) + REFERRED_USER_REWARD_AMOUNT;
+                    currentData.users[userId].referredByCode = referralCode; // Guarda el código que lo refirió
+                    currentData.users[userId].referralClaimed = true; // Marca que ya reclamó
+                    currentData.users[userId].lastSaveTime = admin.database.ServerValue.TIMESTAMP;
+                    console.log(`Usuario referido ${userId} recompensado con ${REFERRED_USER_REWARD_AMOUNT}.`);
+                } else {
+                    // Esto no debería ocurrir si ya lo validamos con referredUserSnapshot
+                    console.error(`Error en transacción: Usuario referido ${userId} no encontrado en currentData.`);
+                    return; // Aborta la transacción
+                }
+
+                // --- Actualizar el usuario referente (el que dio el código) ---
+                if (currentData.users[referrerUid]) {
+                    currentData.users[referrerUid].balance = (currentData.users[referrerUid].balance || 0) + REFERRER_REWARD_AMOUNT;
+                    currentData.users[referrerUid].referredUsersCount = (currentData.users[referrerUid].referredUsersCount || 0) + 1;
+                    currentData.users[referrerUid].lastSaveTime = admin.database.ServerValue.TIMESTAMP;
+                    console.log(`Usuario referente ${referrerUid} recompensado con ${REFERRER_REWARD_AMOUNT}.`);
+                } else {
+                    // Esto no debería ocurrir si ya lo validamos con referrerSnapshot
+                    console.error(`Error en transacción: Usuario referente ${referrerUid} no encontrado en currentData.`);
+                    return; // Aborta la transacción
+                }
+
+                // --- Registrar el evento de referido en la colección 'referrals' (opcional pero recomendado) ---
+                // Esto te da un historial detallado de quién refirió a quién.
                 if (!currentData.referrals) {
                     currentData.referrals = {};
                 }
-
-                // --- Actualizar el usuario referido ---
-                if (currentData.users[referredUserUid]) {
-                    currentData.users[referredUserUid].balance = (currentData.users[referredUserUid].balance || 0) + referralRewardAmount;
-                    currentData.users[referredUserUid].referredByCode = referrerCode;
-                    currentData.users[referredUserUid].referralClaimed = true;
-                    currentData.users[referredUserUid].lastSaveTime = admin.database.ServerValue.TIMESTAMP;
-                    console.log(`Usuario referido ${referredUserUid} recompensado con ${referralRewardAmount}.`);
-                } else {
-                    console.error(`Error en transacción: Usuario referido ${referredUserUid} no encontrado en currentData.`);
-                    return;
-                }
-
-                // --- Actualizar el usuario referente ---
-                if (currentData.users[referrerUid]) {
-                    currentData.users[referrerUid].balance = (currentData.users[referrerUid].balance || 0) + referralRewardAmount;
-                    currentData.users[referrerUid].referredUsersCount = (currentData.users[referrerUid].referredUsersCount || 0) + 1;
-                    currentData.users[referrerUid].lastSaveTime = admin.database.ServerValue.TIMESTAMP;
-                    console.log(`Usuario referente ${referrerUid} recompensado con ${referralRewardAmount}.`);
-                } else {
-                    console.error(`Error en transacción: Usuario referente ${referrerUid} no encontrado en currentData.`);
-                    return;
-                }
-
-                // --- Registrar el evento de referido en la colección 'referrals' ---
                 if (!currentData.referrals[referrerUid]) {
                     currentData.referrals[referrerUid] = {};
                 }
-                currentData.referrals[referrerUid][referredUserUid] = {
-                    referredUserUid: referredUserUid,
-                    referredUserCode: referredUserData.referralCode,
-                    rewardAmount: referralRewardAmount,
-                    source: source,
+                currentData.referrals[referrerUid][userId] = { // Usamos el UID del referido como clave
+                    referredUserUid: userId,
+                    rewardAmountReferrer: REFERRER_REWARD_AMOUNT,
+                    rewardAmountReferred: REFERRED_USER_REWARD_AMOUNT,
                     timestamp: admin.database.ServerValue.TIMESTAMP
                 };
-                console.log(`Evento de referido registrado para ${referrerUid} y ${referredUserUid}.`);
+                console.log(`Evento de referido registrado para ${referrerUid} y ${userId}.`);
+
+                return currentData; // Si todo va bien, se guardan los cambios de la transacción
             }
-            return currentData;
+            // Si currentData es nulo, significa que la transacción falló al leer los datos iniciales
+            console.error("Transacción abortada: currentData es nulo.");
+            return;
         });
 
         // 5. Enviar respuesta de éxito al cliente
@@ -356,12 +364,13 @@ app.post('/api/apply-referral', async (req, res) => {
 
     } catch (error) {
         console.error('Error en el backend al aplicar referido:', error);
+        // Manejo de errores específicos de Firebase Admin SDK
         if (error.code === 'PERMISSION_DENIED') {
-            res.status(403).json({ success: false, message: 'Error de permisos de Firebase. Verifique su Service Account Key o reglas.' });
+            res.status(403).json({ success: false, message: 'Error de permisos de Firebase. Verifique su Service Account Key o reglas de seguridad.' });
         } else if (error.code === 'transaction failed') {
-            res.status(500).json({ success: false, message: 'Fallo la transacción de la base de datos.' });
+            res.status(500).json({ success: false, message: 'Fallo la transacción de la base de datos. Intente de nuevo.' });
         } else {
-            res.status(500).json({ success: false, message: 'Error interno del servidor al aplicar referido.' });
+            res.status(500).json({ success: false, message: 'Error interno del servidor al aplicar el código de referido.' });
         }
     }
 });
