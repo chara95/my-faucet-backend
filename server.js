@@ -264,13 +264,16 @@ app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
 app.post('/api/apply-referral-code', async (req, res) => {
     const { referralCode, userId } = req.body;
 
-    // 1. Validación inicial de los datos recibidos
+    console.log("Petición recibida en /api/apply-referral-code");
+    console.log("Contenido del cuerpo del requisito:", req.body); // Updated log for clarity
+
     if (!referralCode || !userId) {
+        console.error('Error: Faltan parámetros en la petición /api/apply-referral-code.');
         return res.status(400).json({ success: false, message: 'Código de referido y ID de usuario son requeridos.' });
     }
 
     try {
-        // 2. Obtener los datos del usuario que intenta aplicar el código (el "referido")
+        // 1. Obtener los datos del usuario que intenta aplicar el código (el "referido")
         const referredUserRef = db.ref('users').child(userId);
         const referredUserSnapshot = await referredUserRef.once('value');
         const referredUserData = referredUserSnapshot.val();
@@ -285,8 +288,8 @@ app.post('/api/apply-referral-code', async (req, res) => {
             console.warn(`Usuario ${userId} ya ha sido referido o ya reclamó recompensa.`);
             return res.status(400).json({ success: false, message: 'Ya has utilizado un código de referido o ya reclamaste la recompensa.' });
         }
-
-        // 3. Buscar al usuario referente (el que posee el código de referido)
+        
+        // 2. Buscar al usuario referente (el que posee el código de referido)
         const referrerSnapshot = await db.ref('users')
             .orderByChild('referralCode')
             .equalTo(referralCode)
@@ -298,7 +301,6 @@ app.post('/api/apply-referral-code', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Código de referido no válido.' });
         }
 
-        // Obtener el UID del usuario referente
         const referrerUid = Object.keys(referrerSnapshot.val())[0];
         const referrerData = referrerSnapshot.val()[referrerUid]; // Datos del usuario referente
 
@@ -308,75 +310,55 @@ app.post('/api/apply-referral-code', async (req, res) => {
             return res.status(400).json({ success: false, message: 'No puedes referirte a ti mismo.' });
         }
 
-        // 4. Aplicar las recompensas utilizando una transacción para asegurar la atomicidad
-        // Usamos una transacción en la raíz o en los nodos de usuario relevantes para bloquearlos durante la actualización.
-        // Esto previene condiciones de carrera si varios usuarios intentan actualizar balances al mismo tiempo.
-        await db.ref('/').transaction(currentData => {
-            if (currentData) {
-                // Asegurarse de que los nodos de usuarios existen
-                if (!currentData.users) {
-                    currentData.users = {};
-                }
+        // A PARTIR DE AQUÍ CAMBIAMOS LA LÓGICA DE ACTUALIZACIÓN
+        // Ya que las lecturas previas funcionan, podemos confiar en obtener los datos de esta manera.
+        // Ahora, preparamos un objeto para una actualización multi-ruta atómica.
 
-                // --- Actualizar el usuario referido (el que aplicó el código) ---
-                if (currentData.users[userId]) {
-                    currentData.users[userId].balance = (currentData.users[userId].balance || 0) + REFERRED_USER_REWARD_AMOUNT;
-                    currentData.users[userId].referredByCode = referralCode; // Guarda el código que lo refirió
-                    currentData.users[userId].referralClaimed = true; // Marca que ya reclamó
-                    currentData.users[userId].lastSaveTime = admin.database.ServerValue.TIMESTAMP;
-                    console.log(`Usuario referido ${userId} recompensado con ${REFERRED_USER_REWARD_AMOUNT}.`);
-                } else {
-                    // Esto no debería ocurrir si ya lo validamos con referredUserSnapshot
-                    console.error(`Error en transacción: Usuario referido ${userId} no encontrado en currentData.`);
-                    return; // Aborta la transacción
-                }
+        // Obtenemos los balances actuales (ya leídos arriba, pero para claridad)
+        const referredUserCurrentBalance = referredUserData.balance || 0;
+        const referrerCurrentBalance = referrerData.balance || 0;
 
-                // --- Actualizar el usuario referente (el que dio el código) ---
-                if (currentData.users[referrerUid]) {
-                    currentData.users[referrerUid].balance = (currentData.users[referrerUid].balance || 0) + REFERRER_REWARD_AMOUNT;
-                    currentData.users[referrerUid].referredUsersCount = (currentData.users[referrerUid].referredUsersCount || 0) + 1;
-                    currentData.users[referrerUid].lastSaveTime = admin.database.ServerValue.TIMESTAMP;
-                    console.log(`Usuario referente ${referrerUid} recompensado con ${REFERRER_REWARD_AMOUNT}.`);
-                } else {
-                    // Esto no debería ocurrir si ya lo validamos con referrerSnapshot
-                    console.error(`Error en transacción: Usuario referente ${referrerUid} no encontrado en currentData.`);
-                    return; // Aborta la transacción
-                }
+        // Calculamos los nuevos balances y el contador de referidos
+        const newReferredUserBalance = referredUserCurrentBalance + REFERRED_USER_REWARD_AMOUNT;
+        const newReferrerBalance = referrerCurrentBalance + REFERRER_REWARD_AMOUNT;
+        const newReferrerReferredUsersCount = (referrerData.referredUsersCount || 0) + 1;
 
-                // --- Registrar el evento de referido en la colección 'referrals' (opcional pero recomendado) ---
-                // Esto te da un historial detallado de quién refirió a quién.
-                if (!currentData.referrals) {
-                    currentData.referrals = {};
-                }
-                if (!currentData.referrals[referrerUid]) {
-                    currentData.referrals[referrerUid] = {};
-                }
-                currentData.referrals[referrerUid][userId] = { // Usamos el UID del referido como clave
-                    referredUserUid: userId,
-                    rewardAmountReferrer: REFERRER_REWARD_AMOUNT,
-                    rewardAmountReferred: REFERRED_USER_REWARD_AMOUNT,
-                    timestamp: admin.database.ServerValue.TIMESTAMP
-                };
-                console.log(`Evento de referido registrado para ${referrerUid} y ${userId}.`);
+        // Preparamos el objeto de actualización multi-ruta
+        const updates = {};
 
-                return currentData; // Si todo va bien, se guardan los cambios de la transacción
-            }
-            // Si currentData es nulo, significa que la transacción falló al leer los datos iniciales
-            console.error("Transacción abortada: currentData es nulo.");
-            return;
-        });
+        // Actualizaciones para el usuario referido
+        updates[`users/${userId}/balance`] = newReferredUserBalance;
+        updates[`users/${userId}/referredByCode`] = referralCode;
+        updates[`users/${userId}/referralClaimed`] = true;
+        updates[`users/${userId}/lastSaveTime`] = admin.database.ServerValue.TIMESTAMP;
 
-        // 5. Enviar respuesta de éxito al cliente
+        // Actualizaciones para el usuario referente
+        updates[`users/${referrerUid}/balance`] = newReferrerBalance;
+        updates[`users/${referrerUid}/referredUsersCount`] = newReferrerReferredUsersCount;
+        updates[`users/${referrerUid}/lastSaveTime`] = admin.database.ServerValue.TIMESTAMP;
+
+        // Registro del evento de referido en la colección 'referrals'
+        // Firebase creará el nodo 'referrals' y sus hijos si no existen.
+        updates[`referrals/${referrerUid}/${userId}`] = {
+            referredUserUid: userId,
+            rewardAmountReferrer: REFERRER_REWARD_AMOUNT,
+            rewardAmountReferred: REFERRED_USER_REWARD_AMOUNT,
+            timestamp: admin.database.ServerValue.TIMESTAMP
+        };
+
+        // Ejecutar la actualización multi-ruta atómicamente
+        await db.ref('/').update(updates);
+        console.log(`Recompensas aplicadas y datos registrados para ${userId} y ${referrerUid} usando actualización multi-ruta.`);
+
+        // Enviar respuesta de éxito al cliente
         res.json({ success: true, message: 'Recompensa de referido aplicada con éxito.' });
 
     } catch (error) {
         console.error('Error en el backend al aplicar referido:', error);
-        // Manejo de errores específicos de Firebase Admin SDK
         if (error.code === 'PERMISSION_DENIED') {
             res.status(403).json({ success: false, message: 'Error de permisos de Firebase. Verifique su Service Account Key o reglas de seguridad.' });
-        } else if (error.code === 'transaction failed') {
-            res.status(500).json({ success: false, message: 'Fallo la transacción de la base de datos. Intente de nuevo.' });
         } else {
+            // Un error inesperado (ej. de red, o un problema con los datos de Firebase)
             res.status(500).json({ success: false, message: 'Error interno del servidor al aplicar el código de referido.' });
         }
     }
