@@ -128,31 +128,67 @@ app.post('/api/validate-faucetpay-email', async (req, res) => {
 
 // --- ENDPOINT PARA PROCESAR EL RETIRO ---
 app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
-    const { email, amount } = req.body;
+    // 1. MODIFICADO: Ahora esperamos también el 'userId' del frontend en el cuerpo de la solicitud.
+    const { email, amount, userId } = req.body; 
 
-    if (!email || !amount) {
-        return res.status(400).json({ success: false, message: 'Email/dirección y monto son requeridos para el retiro.' });
+    // 2. MODIFICADO: Validamos que el 'userId' también esté presente. Si falta, es un error de solicitud.
+    if (!email || !amount || !userId) { 
+        return res.status(400).json({ success: false, message: 'Email/dirección, monto y ID de usuario son requeridos para el retiro.' });
     }
 
+    // Convertimos el monto recibido (ej. 0.00001 LTC) a un número flotante.
+    const withdrawalAmountLTC = parseFloat(amount); 
+
+    // Convertir el monto a la unidad más pequeña (litoshis para LTC, satoshis para BTC).
+    // FaucetPay espera montos en unidades enteras (ej. 10000 para 0.0001 LTC).
     let amountInSmallestUnit;
     if (FAUCETPAY_CURRENCY === 'LTC') {
-        amountInSmallestUnit = Math.round(parseFloat(amount) * 100_000_000);
+        // Multiplicamos por 100 millones porque 1 LTC = 100,000,000 Litoshis.
+        amountInSmallestUnit = Math.round(withdrawalAmountLTC * 100_000_000); 
     } else if (FAUCETPAY_CURRENCY === 'BTC') {
-        amountInSmallestUnit = Math.round(parseFloat(amount) * 100_000_000);
+        // Para BTC también es 100,000,000 Satoshis.
+        amountInSmallestUnit = Math.round(withdrawalAmountLTC * 100_000_000);
     } else {
+        // Si la moneda configurada no es LTC o BTC, devolvemos un error.
         return res.status(400).json({ success: false, message: 'Moneda no soportada para el retiro.' });
     }
 
+    // 3. NUEVO: Definimos la comisión de retiro. Es CRÍTICO que este valor coincida con el frontend.
+    const WITHDRAWAL_FEE = 0.00001000; // Ejemplo: 10000 Litoshis, en formato LTC decimal.
+    // Calculamos el costo total del retiro, incluyendo el monto y la comisión.
+    const totalCostLTC = withdrawalAmountLTC + WITHDRAWAL_FEE; 
+
+    // Referencia al nodo del usuario específico en tu base de datos de Firebase Realtime Database.
+    const userRef = db.ref(`users/${userId}`); 
+
     try {
+        // 4. NUEVO BLOQUE: Paso de SEGURIDAD: Obtenemos el balance actual del usuario directamente de Firebase.
+        // Usamos 'once' para leer el valor una sola vez.
+        const snapshot = await userRef.once('value'); 
+        const userData = snapshot.val();
+        // Si el usuario no existe o no tiene balance, asumimos 0.
+        const currentBalance = userData.balance || 0;
+
+        // 5. NUEVO BLOQUE: Verificamos si el balance actual del usuario es suficiente para cubrir el retiro + la comisión.
+        if (currentBalance < totalCostLTC) { 
+            console.warn(`Intento de retiro fallido para ${userId}: balance insuficiente. Solicitado: ${totalCostLTC}, Actual: ${currentBalance}`);
+            // Devolvemos un error si no hay balance suficiente.
+            return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro.' });
+        }
+
+        // 6. CÓDIGO EXISTENTE (con una pequeña adición): Preparamos y realizamos la llamada a la API de FaucetPay.
         const FAUCETPAY_SEND_URL = 'https://faucetpay.io/api/v1/send';
 
         const formData = new URLSearchParams();
         formData.append('api_key', FAUCETPAY_API_KEY);
         formData.append('to', email);
-        formData.append('amount', amountInSmallestUnit);
+        formData.append('amount', amountInSmallestUnit); // ¡Importante! Aquí enviamos el monto en Litoshis/Satoshis.
         formData.append('currency', FAUCETPAY_CURRENCY);
+        // 7. MODIFICADO/AÑADIDO: 'alt_payid' es un parámetro opcional de FaucetPay. 
+        // Usamos el userId del usuario para poder rastrear este pago específico en tu historial de FaucetPay.
+        formData.append('alt_payid', userId); 
 
-        const response = await fetch(FAUCETPAY_SEND_URL, {
+        const faucetPayResponse = await fetch(FAUCETPAY_SEND_URL, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -160,31 +196,62 @@ app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
             body: formData,
         });
 
-        const faucetPayData = await response.json();
+        const faucetPayData = await faucetPayResponse.json();
 
         console.log("Respuesta de FaucetPay (envío):", faucetPayData);
 
+        // 8. MODIFICACIÓN CRÍTICA: Procesamos la respuesta de FaucetPay.
         if (faucetPayData.status === 200 && faucetPayData.message === "OK") {
+            // El pago a FaucetPay fue exitoso.
+            
+            // 8a. NUEVO BLOQUE CRÍTICO: Actualizamos el balance del usuario en Firebase.
+            // Calculamos el nuevo balance restando el costo total (monto + comisión).
+            const newBalance = currentBalance - totalCostLTC; 
+            // Actualizamos el campo 'balance' del usuario en Firebase.
+            await userRef.update({ balance: newBalance }); 
+            console.log(`Balance de ${userId} actualizado a ${newBalance} LTC después de retiro exitoso.`);
+
+            // 8b. NUEVO BLOQUE CRÍTICO: Registramos la transacción de retiro en Firebase.
+            // Esto es crucial para un historial de transacciones y para depuración.
+            const transactionsRef = db.ref(`transactions/${userId}`);
+            // Usamos .push() para generar una clave única para cada transacción.
+            await transactionsRef.push({ 
+                type: 'withdrawal', // Tipo de transacción
+                amount: withdrawalAmountLTC, // Monto retirado (sin la comisión)
+                fee: WITHDRAWAL_FEE, // Comisión aplicada
+                faucetPayEmail: email, // Correo de FaucetPay al que se envió
+                timestamp: admin.database.ServerValue.TIMESTAMP, // Timestamp del servidor de Firebase para precisión
+                status: 'completed', // Estado de la transacción
+                faucetPayTxId: faucetPayData.payout_id || 'N/A', // ID de la transacción de FaucetPay (si está disponible)
+                faucetPayBalanceAfter: faucetPayData.balance // Balance de TU cuenta de FaucetPay después del retiro.
+            });
+            console.log(`Transacción de retiro registrada para ${userId}.`);
+
+            // Respondemos al frontend indicando que el retiro fue exitoso.
             res.json({
                 success: true,
                 message: 'Retiro procesado con éxito.',
-                payout_id: faucetPayData.payout_id,
-                balance: faucetPayData.balance
+                payout_id: faucetPayData.payout_id, // ID del pago de FaucetPay
+                // 9. MODIFICADO: Devolvemos el nuevo balance del usuario de tu DB, no el balance de FaucetPay.
+                balance: newBalance 
             });
         } else {
-            console.error('Error de FaucetPay al procesar retiro:', faucetPayData.message || 'Error desconocido');
-            res.status(400).json({
+            // Si FaucetPay no devuelve un 200 OK, significa que el pago falló.
+            // En este caso, NO descontamos el balance del usuario en nuestra DB.
+            console.error(`Fallo de FaucetPay para ${userId}:`, faucetPayData.message || 'Error desconocido');
+            // Devolvemos un error al frontend.
+            res.status(400).json({ 
                 success: false,
-                message: faucetPayData.message || 'Error al procesar el retiro.'
+                message: faucetPayData.message || 'Error al procesar el retiro con FaucetPay.'
             });
         }
 
     } catch (error) {
-        console.error('Error interno del servidor al procesar el retiro:', error);
+        // Capturamos cualquier error que ocurra durante el proceso (red, Firebase, etc.).
+        console.error(`Error interno del servidor al procesar el retiro para ${userId}:`, error);
         res.status(500).json({ success: false, message: 'Error interno del servidor al procesar el retiro.' });
     }
 });
-
 
 // --- NUEVO: ENDPOINT: /api/apply-referral ---
 // Este endpoint es llamado por tu aplicación móvil cuando un usuario intenta aplicar un código de referido.
