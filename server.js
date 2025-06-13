@@ -67,7 +67,15 @@ const REFERRER_REWARD_AMOUNT = 0.00000200;     // Ejemplo: 200 Litoshis (0.00000
 
 // Configuración de middlewares
 app.use(express.json()); // Middleware para parsear bodies de solicitud JSON
-app.use(cors());
+// app.use(cors());
+
+app.use(cors({
+    origin: ['http://127.0.0.1:3000', 'http://localhost:3000', 'https://tu-dominio-frontend-en-render.onrender.com'], 
+    methods: ['GET', 'POST', 'OPTIONS'], // <--- ¡Asegúrate de que 'OPTIONS' esté aquí!
+    allowedHeaders: ['Content-Type', 'Authorization'], 
+    credentials: true 
+}));
+
 
 
 
@@ -254,16 +262,10 @@ app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
 // --- NUEVO/MODIFICADO: ENDPOINT: /api/apply-referral-code ---
 // Este endpoint es llamado cuando un usuario intenta aplicar un código de referido manualmente.
 app.post('/api/apply-referral-code', async (req, res) => {
-    console.log("Petición recibida en /api/apply-referral-code");
-    console.log("Contenido de req.body:", req.body);
     const { referralCode, userId } = req.body;
 
     // 1. Validación inicial de los datos recibidos
     if (!referralCode || !userId) {
-        console.error('Error: Faltan parámetros en la petición /api/apply-referral-code.');
-        console.error('Error: Faltan parámetros en la petición /api/apply-referral-code.');
-        console.error(`  referralCode: ${referralCode}`); // Para ver el valor exacto
-        console.error(`  userId: ${userId}`);
         return res.status(400).json({ success: false, message: 'Código de referido y ID de usuario son requeridos.' });
     }
 
