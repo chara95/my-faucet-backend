@@ -263,12 +263,7 @@ app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
 // Este endpoint es llamado cuando un usuario intenta aplicar un código de referido manualmente.
 app.post('/api/apply-referral-code', async (req, res) => {
     const { referralCode, userId } = req.body;
-
-    console.log("Petición recibida en /api/apply-referral-code");
-    console.log("Contenido del cuerpo del requisito:", req.body); // Updated log for clarity
-
     if (!referralCode || !userId) {
-        console.error('Error: Faltan parámetros en la petición /api/apply-referral-code.');
         return res.status(400).json({ success: false, message: 'Código de referido y ID de usuario son requeridos.' });
     }
 
@@ -285,7 +280,7 @@ app.post('/api/apply-referral-code', async (req, res) => {
 
         // Validación: El usuario ya ha sido referido o ya ha reclamado una recompensa de referido.
         if (referredUserData.referredByCode || referredUserData.referralClaimed) {
-            console.warn(`Usuario ${userId} ya ha sido referido o ya reclamó recompensa.`);
+            // console.warn(`Usuario ${userId} ya ha sido referido o ya reclamó recompensa.`);
             return res.status(400).json({ success: false, message: 'Ya has utilizado un código de referido o ya reclamaste la recompensa.' });
         }
         
@@ -297,7 +292,7 @@ app.post('/api/apply-referral-code', async (req, res) => {
             .once('value');
 
         if (!referrerSnapshot.exists()) {
-            console.warn(`Intento de referido con código no válido: ${referralCode}`);
+            // console.warn(`Intento de referido con código no válido: ${referralCode}`);
             return res.status(400).json({ success: false, message: 'Código de referido no válido.' });
         }
 
@@ -306,7 +301,7 @@ app.post('/api/apply-referral-code', async (req, res) => {
 
         // Validación: Prevenir auto-referido
         if (userId === referrerUid) {
-            console.warn(`Intento de auto-referido por UID: ${userId}`);
+            // console.warn(`Intento de auto-referido por UID: ${userId}`);
             return res.status(400).json({ success: false, message: 'No puedes referirte a ti mismo.' });
         }
 
@@ -348,13 +343,12 @@ app.post('/api/apply-referral-code', async (req, res) => {
 
         // Ejecutar la actualización multi-ruta atómicamente
         await db.ref('/').update(updates);
-        console.log(`Recompensas aplicadas y datos registrados para ${userId} y ${referrerUid} usando actualización multi-ruta.`);
+        // console.log(`Recompensas aplicadas y datos registrados para ${userId} y ${referrerUid} usando actualización multi-ruta.`);
 
         // Enviar respuesta de éxito al cliente
         res.json({ success: true, message: 'Recompensa de referido aplicada con éxito.' });
 
     } catch (error) {
-        console.error('Error en el backend al aplicar referido:', error);
         if (error.code === 'PERMISSION_DENIED') {
             res.status(403).json({ success: false, message: 'Error de permisos de Firebase. Verifique su Service Account Key o reglas de seguridad.' });
         } else {
