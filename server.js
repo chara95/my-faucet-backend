@@ -243,6 +243,8 @@ app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
 
 // Este endpoint es llamado cuando un usuario intenta aplicar un código de referido manualmente.
 app.post('/api/apply-referral-code', async (req, res) => {
+
+    console.log('[REFERRAL_ENDPOINT] Iniciando procesamiento de solicitud de referido.');
     const { referralCode, userId } = req.body;
     if (!referralCode || !userId) {
         return res.status(400).json({ success: false, message: 'Código de referido y ID de usuario son requeridos.' });
