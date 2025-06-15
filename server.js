@@ -137,61 +137,49 @@ app.post('/api/validate-faucetpay-email', async (req, res) => {
 
 // --- ENDPOINT PARA PROCESAR EL RETIRO ---
 app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
-    // 1. MODIFICADO: Ahora esperamos también el 'userId' del frontend en el cuerpo de la solicitud.
     const { email, amount, userId } = req.body;
 
-    // 2. MODIFICADO: Validamos que el 'userId' también esté presente. Si falta, es un error de solicitud.
     if (!email || !amount || !userId) {
         return res.status(400).json({ success: false, message: 'Email/dirección, monto y ID de usuario son requeridos para el retiro.' });
     }
 
-    // Convertimos el monto recibido (ej. 0.00001 LTC) a un número flotante.
-    const withdrawalAmountLTC = parseFloat(amount);
-
-    // Convertir el monto a la unidad más pequeña (litoshis para LTC, satoshis para BTC).
-    // FaucetPay espera montos en unidades enteras (ej. 10000 para 0.0001 LTC).
-    let amountInSmallestUnit;
-    if (FAUCETPAY_CURRENCY === 'LTC') {
-        // Multiplicamos por 100 millones porque 1 LTC = 100,000,000 Litoshis.
-        amountInSmallestUnit = Math.round(withdrawalAmountLTC * 100_000_000);
-    } else if (FAUCETPAY_CURRENCY === 'BTC') {
-        // Para BTC también es 100,000,000 Satoshis.
-        amountInSmallestUnit = Math.round(withdrawalAmountLTC * 100_000_000);
-    } else {
-        // Si la moneda configurada no es LTC o BTC, devolvemos un error.
-        return res.status(400).json({ success: false, message: 'Moneda no soportada para el retiro.' });
+    // 1. Convertir el monto recibido del frontend (LTC decimal) a Litoshis (entero)
+    const withdrawalAmountLTC = parseFloat(amount); // Ejemplo: 0.0002 LTC
+    if (isNaN(withdrawalAmountLTC) || withdrawalAmountLTC <= 0) {
+        return res.status(400).json({ success: false, message: 'Monto de retiro inválido.' });
     }
+    const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * 100_000_000); // Ejemplo: 20000 Litoshis
 
-    // 3. NUEVO: Definimos la comisión de retiro. Es CRÍTICO que este valor coincida con el frontend.
-    const WITHDRAWAL_FEE = 0.00001000; // Ejemplo: 10000 Litoshis, en formato LTC decimal.
-    // Calculamos el costo total del retiro, incluyendo el monto y la comisión.
-    const totalCostLTC = withdrawalAmountLTC + WITHDRAWAL_FEE;
+    // 2. Definir la comisión SIEMPRE en Litoshis (entero)
+    const WITHDRAWAL_FEE_LITOSHIS = 1000; // Esto representa 0.00001000 LTC
 
-    // Referencia al nodo del usuario específico en tu base de datos de Firebase Realtime Database.
+    // 3. Calcular el costo total en Litoshis (entero)
+    const totalCostLitoshis = withdrawalAmountLitoshis + WITHDRAWAL_FEE_LITOSHIS;
+
+    // Referencia al nodo del usuario específico en tu base de datos de Firebase.
     const userRef = db.ref(`users/${userId}`);
 
     try {
-        // 4. NUEVO BLOQUE: Paso de SEGURIDAD: Obtenemos el balance actual del usuario directamente de Firebase.
-        // Usamos 'once' para leer el valor una sola vez.
+        // 4. Obtener el balance actual del usuario de Firebase.
+        // ASUMIMOS que el balance en Firebase ya está o se va a migrar a Litoshis (enteros).
         const snapshot = await userRef.once('value');
         const userData = snapshot.val();
-        // Si el usuario no existe o no tiene balance, asumimos 0.
-        const currentBalance = userData.balance || 0;
+        const currentBalanceLitoshis = userData.balance || 0; // Lee el balance como Litoshis
 
-        // 5. NUEVO BLOQUE: Verificamos si el balance actual del usuario es suficiente para cubrir el retiro + la comisión.
-        if (currentBalance < totalCostLTC) {
-            console.warn(`Intento de retiro fallido para ${userId}: balance insuficiente. Solicitado: ${totalCostLTC}, Actual: ${currentBalance}`);
-            // Devolvemos un error si no hay balance suficiente.
+        // 5. Verificar si el balance es suficiente (todos los valores son Litoshis enteros)
+        if (currentBalanceLitoshis < totalCostLitoshis) {
+            console.warn(`Intento de retiro fallido para ${userId}: balance insuficiente. Solicitado (Litoshis): ${totalCostLitoshis}, Actual (Litoshis): ${currentBalanceLitoshis}`);
             return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro.' });
         }
 
-        // 6. CÓDIGO EXISTENTE (con una pequeña adición): Preparamos y realizamos la llamada a la API de FaucetPay.
+        // 6. Preparar y realizar la llamada a la API de FaucetPay.
+        // FaucetPay espera montos en su unidad más pequeña (Litoshis/Satoshis).
         const FAUCETPAY_SEND_URL = 'https://faucetpay.io/api/v1/send';
 
         const formData = new URLSearchParams();
         formData.append('api_key', FAUCETPAY_API_KEY);
         formData.append('to', email);
-        formData.append('amount', amountInSmallestUnit);
+        formData.append('amount', withdrawalAmountLitoshis); // <-- Enviar Litoshis a FaucetPay (es lo que espera)
         formData.append('currency', FAUCETPAY_CURRENCY);
 
         const faucetPayResponse = await fetch(FAUCETPAY_SEND_URL, {
@@ -206,46 +194,42 @@ app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
 
         console.log("Respuesta de FaucetPay (envío):", faucetPayData);
 
-        // 8. MODIFICACIÓN CRÍTICA: Procesamos la respuesta de FaucetPay.
+        // 7. Procesar la respuesta de FaucetPay.
         if (faucetPayData.status === 200 && faucetPayData.message === "OK") {
             // El pago a FaucetPay fue exitoso.
 
-            // 8a. NUEVO BLOQUE CRÍTICO: Actualizamos el balance del usuario en Firebase.
-            // Calculamos el nuevo balance restando el costo total (monto + comisión).
-            const newBalance = currentBalance - totalCostLTC;
-            // Actualizamos el campo 'balance' del usuario en Firebase.
-            await userRef.update({ balance: newBalance });
-            console.log(`Balance de ${userId} actualizado a ${newBalance} LTC después de retiro exitoso.`);
+            // 8. Actualizar el balance del usuario en Firebase (en Litoshis enteros)
+            const newBalanceLitoshis = currentBalanceLitoshis - totalCostLitoshis; // Cálculos en Litoshis
+            await userRef.update({ balance: newBalanceLitoshis }); // Guardar Litoshis en Firebase
 
-            // 8b. NUEVO BLOQUE CRÍTICO: Registramos la transacción de retiro en Firebase.
-            // Esto es crucial para un historial de transacciones y para depuración.
+            // Log de la actualización del balance
+            console.log(`Balance de ${userId} actualizado a ${newBalanceLitoshis} Litoshis después de retiro exitoso.`);
+
+            // 9. Registrar la transacción de retiro en Firebase (manteniendo consistencia)
             const transactionsRef = db.ref(`transactions/${userId}`);
-            // Usamos .push() para generar una clave única para cada transacción.
             await transactionsRef.push({
-                type: 'withdrawal', // Tipo de transacción
-                amount: withdrawalAmountLTC, // Monto retirado (sin la comisión)
-                fee: WITHDRAWAL_FEE, // Comisión aplicada
-                faucetPayEmail: email, // Correo de FaucetPay al que se envió
-                timestamp: admin.database.ServerValue.TIMESTAMP, // Timestamp del servidor de Firebase para precisión
-                status: 'completed', // Estado de la transacción
-                faucetPayTxId: faucetPayData.payout_id || 'N/A', // ID de la transacción de FaucetPay (si está disponible)
-                faucetPayBalanceAfter: faucetPayData.balance // Balance de TU cuenta de FaucetPay después del retiro.
+                type: 'withdrawal',
+                amount: withdrawalAmountLitoshis, // Registrar en Litoshis
+                fee: WITHDRAWAL_FEE_LITOSHIS,     // Registrar en Litoshis
+                faucetPayEmail: email,
+                timestamp: admin.database.ServerValue.TIMESTAMP,
+                status: 'completed',
+                faucetPayTxId: faucetPayData.payout_id || 'N/A',
+                // Si faucetPayData.balance devuelve LTC decimal, considera no guardarlo o convertirlo
+                // faucetPayBalanceAfter: faucetPayData.balance // Esto podría ser decimal de FaucetPay
             });
             console.log(`Transacción de retiro registrada para ${userId}.`);
 
-            // Respondemos al frontend indicando que el retiro fue exitoso.
+            // 10. Responder al frontend. Devuelve el nuevo balance en Litoshis enteros.
             res.json({
                 success: true,
                 message: 'Retiro procesado con éxito.',
-                payout_id: faucetPayData.payout_id, // ID del pago de FaucetPay
-                // 9. MODIFICADO: Devolvemos el nuevo balance del usuario de tu DB, no el balance de FaucetPay.
-                balance: newBalance
+                payout_id: faucetPayData.payout_id,
+                balance: newBalanceLitoshis // <-- Devuelve el balance en Litoshis enteros
             });
         } else {
-            // Si FaucetPay no devuelve un 200 OK, significa que el pago falló.
-            // En este caso, NO descontamos el balance del usuario en nuestra DB.
+            // Si FaucetPay falla, NO descontamos el balance del usuario.
             console.error(`Fallo de FaucetPay para ${userId}:`, faucetPayData.message || 'Error desconocido');
-            // Devolvemos un error al frontend.
             res.status(400).json({
                 success: false,
                 message: faucetPayData.message || 'Error al procesar el retiro con FaucetPay.'
@@ -253,7 +237,6 @@ app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
         }
 
     } catch (error) {
-        // Capturamos cualquier error que ocurra durante el proceso (red, Firebase, etc.).
         console.error(`Error interno del servidor al procesar el retiro para ${userId}:`, error);
         res.status(500).json({ success: false, message: 'Error interno del servidor al procesar el retiro.' });
     }
