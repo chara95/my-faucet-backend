@@ -262,6 +262,7 @@ app.post('/api/apply-referral-code', async (req, res) => {
         // Validación: El usuario ya ha sido referido o ya ha reclamado una recompensa.
         // Asumiendo que 'referredByCode' y 'referralClaimed' son banderas booleanas.
         if (referredUserData.referredByCode || referredUserData.referralClaimed) {
+            console.error(`Ya has utilizado un código de referido o ya reclamaste la recompensa.D: ${userId}`);
             return res.status(400).json({ success: false, message: 'Ya has utilizado un código de referido o ya reclamaste la recompensa.' });
         }
 
@@ -273,6 +274,7 @@ app.post('/api/apply-referral-code', async (req, res) => {
             .once('value');
 
         if (!referrerSnapshot.exists()) {
+            console.error(`Código de referido no válido.: ${userId}`);
             return res.status(400).json({ success: false, message: 'Código de referido no válido.' });
         }
 
@@ -281,6 +283,7 @@ app.post('/api/apply-referral-code', async (req, res) => {
 
         // Validación: Prevenir auto-referido
         if (userId === referrerUid) {
+            console.error(`No puedes referirte a ti mismo.: ${userId}`);
             return res.status(400).json({ success: false, message: 'No puedes referirte a ti mismo.' });
         }
 
