@@ -62,9 +62,8 @@ try {
 const db = admin.database();
 // --- FIN NUEVO: CONFIGURACIÓN DE FIREBASE ADMIN SDK ---
 
-const REFERRED_USER_REWARD_AMOUNT = 0.00000200; // Ejemplo: 200 Litoshis (0.000002 LTC) para el que es referido
-const REFERRER_REWARD_AMOUNT = 0.00000200;     // Ejemplo: 200 Litoshis (0.000002 LTC) para el referente
-
+const REFERRED_USER_REWARD_AMOUNT_LITOSHIS = 200; // 0.00005 LTC en Litoshis
+const REFERRER_REWARD_AMOUNT_LITOSHIS = 200;    // 0.00002 LTC en Litoshis
 // Configuración de middlewares
 app.use(express.json()); // Middleware para parsear bodies de solicitud JSON
 // app.use(cors());
@@ -242,7 +241,6 @@ app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
     }
 });
 
-// --- NUEVO/MODIFICADO: ENDPOINT: /api/apply-referral-code ---
 // Este endpoint es llamado cuando un usuario intenta aplicar un código de referido manualmente.
 app.post('/api/apply-referral-code', async (req, res) => {
     const { referralCode, userId } = req.body;
@@ -261,12 +259,12 @@ app.post('/api/apply-referral-code', async (req, res) => {
             return res.status(404).json({ success: false, message: 'Usuario actual no encontrado.' });
         }
 
-        // Validación: El usuario ya ha sido referido o ya ha reclamado una recompensa de referido.
+        // Validación: El usuario ya ha sido referido o ya ha reclamado una recompensa.
+        // Asumiendo que 'referredByCode' y 'referralClaimed' son banderas booleanas.
         if (referredUserData.referredByCode || referredUserData.referralClaimed) {
-            // console.warn(`Usuario ${userId} ya ha sido referido o ya reclamó recompensa.`);
             return res.status(400).json({ success: false, message: 'Ya has utilizado un código de referido o ya reclamaste la recompensa.' });
         }
-        
+
         // 2. Buscar al usuario referente (el que posee el código de referido)
         const referrerSnapshot = await db.ref('users')
             .orderByChild('referralCode')
@@ -275,7 +273,6 @@ app.post('/api/apply-referral-code', async (req, res) => {
             .once('value');
 
         if (!referrerSnapshot.exists()) {
-            // console.warn(`Intento de referido con código no válido: ${referralCode}`);
             return res.status(400).json({ success: false, message: 'Código de referido no válido.' });
         }
 
@@ -284,49 +281,49 @@ app.post('/api/apply-referral-code', async (req, res) => {
 
         // Validación: Prevenir auto-referido
         if (userId === referrerUid) {
-            // console.warn(`Intento de auto-referido por UID: ${userId}`);
             return res.status(400).json({ success: false, message: 'No puedes referirte a ti mismo.' });
         }
 
-        // A PARTIR DE AQUÍ CAMBIAMOS LA LÓGICA DE ACTUALIZACIÓN
-        // Ya que las lecturas previas funcionan, podemos confiar en obtener los datos de esta manera.
-        // Ahora, preparamos un objeto para una actualización multi-ruta atómica.
+        // --- INICIO DE MODIFICACIONES CLAVE ---
 
-        // Obtenemos los balances actuales (ya leídos arriba, pero para claridad)
-        const referredUserCurrentBalance = referredUserData.balance || 0;
-        const referrerCurrentBalance = referrerData.balance || 0;
+        // Obtener los balances actuales de Firebase, ASUMIENDO que ya están en Litoshis enteros
+        const referredUserCurrentBalanceLitoshis = referredUserData.balance || 0;
+        const referrerCurrentBalanceLitoshis = referrerData.balance || 0;
 
-        // Calculamos los nuevos balances y el contador de referidos
-        const newReferredUserBalance = referredUserCurrentBalance + REFERRED_USER_REWARD_AMOUNT;
-        const newReferrerBalance = referrerCurrentBalance + REFERRER_REWARD_AMOUNT;
+        // Calcular los nuevos balances sumando las recompensas en Litoshis enteros
+        const newReferredUserBalanceLitoshis = referredUserCurrentBalanceLitoshis + REFERRED_USER_REWARD_AMOUNT_LITOSHIS;
+        const newReferrerBalanceLitoshis = referrerCurrentBalanceLitoshis + REFERRER_REWARD_AMOUNT_LITOSHIS;
+
         const newReferrerReferredUsersCount = (referrerData.referredUsersCount || 0) + 1;
 
         // Preparamos el objeto de actualización multi-ruta
         const updates = {};
 
         // Actualizaciones para el usuario referido
-        updates[`users/${userId}/balance`] = newReferredUserBalance;
+        updates[`users/${userId}/balance`] = newReferredUserBalanceLitoshis; // Almacenar en Litoshis
         updates[`users/${userId}/referredByCode`] = referralCode;
         updates[`users/${userId}/referralClaimed`] = true;
         updates[`users/${userId}/lastSaveTime`] = admin.database.ServerValue.TIMESTAMP;
 
         // Actualizaciones para el usuario referente
-        updates[`users/${referrerUid}/balance`] = newReferrerBalance;
+        updates[`users/${referrerUid}/balance`] = newReferrerBalanceLitoshis; // Almacenar en Litoshis
         updates[`users/${referrerUid}/referredUsersCount`] = newReferrerReferredUsersCount;
         updates[`users/${referrerUid}/lastSaveTime`] = admin.database.ServerValue.TIMESTAMP;
 
         // Registro del evento de referido en la colección 'referrals'
-        // Firebase creará el nodo 'referrals' y sus hijos si no existen.
         updates[`referrals/${referrerUid}/${userId}`] = {
             referredUserUid: userId,
-            rewardAmountReferrer: REFERRER_REWARD_AMOUNT,
-            rewardAmountReferred: REFERRED_USER_REWARD_AMOUNT,
+            // Registrar las recompensas en Litoshis para la consistencia del historial
+            rewardAmountReferrer: REFERRER_REWARD_AMOUNT_LITOSHIS,
+            rewardAmountReferred: REFERRED_USER_REWARD_AMOUNT_LITOSHIS,
             timestamp: admin.database.ServerValue.TIMESTAMP
         };
 
+        // --- FIN DE MODIFICACIONES CLAVE ---
+
         // Ejecutar la actualización multi-ruta atómicamente
         await db.ref('/').update(updates);
-        // console.log(`Recompensas aplicadas y datos registrados para ${userId} y ${referrerUid} usando actualización multi-ruta.`);
+        console.log(`Recompensas de referido aplicadas y datos registrados para ${userId} y ${referrerUid}.`);
 
         // Enviar respuesta de éxito al cliente
         res.json({ success: true, message: 'Recompensa de referido aplicada con éxito.' });
@@ -335,7 +332,7 @@ app.post('/api/apply-referral-code', async (req, res) => {
         if (error.code === 'PERMISSION_DENIED') {
             res.status(403).json({ success: false, message: 'Error de permisos de Firebase. Verifique su Service Account Key o reglas de seguridad.' });
         } else {
-            // Un error inesperado (ej. de red, o un problema con los datos de Firebase)
+            console.error('Error interno del servidor al aplicar el código de referido:', error); // Log más detallado
             res.status(500).json({ success: false, message: 'Error interno del servidor al aplicar el código de referido.' });
         }
     }
