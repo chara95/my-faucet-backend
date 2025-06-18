@@ -62,11 +62,41 @@ try {
 const db = admin.database();
 // --- FIN NUEVO: CONFIGURACIÓN DE FIREBASE ADMIN SDK ---
 
-const REFERRED_USER_REWARD_AMOUNT_LITOSHIS = 200; // 0.00005 LTC en Litoshis
+// === CONSTANTES EN EL BACKEND (MANTENER SINCRONIZADAS) ===
+// Asegúrate de que estas constantes estén al principio de tu server.js
+const LTC_TO_LITOSHIS_FACTOR = 100_000_000;
+// Comision de retiro
+const WITHDRAWAL_FEE_LITOSHIS = 1000; // 0.00001 LTC
+const MIN_WITHDRAWAL_LITOSHIS_BACKEND = 10000; // 0.0001 LTC
+const REFERRED_USER_REWARD_AMOUNT_LITOSHIS = 200; // 0.00002 LTC en Litoshis
 const REFERRER_REWARD_AMOUNT_LITOSHIS = 200;    // 0.00002 LTC en Litoshis
+
+
+
+
+
+
 // Configuración de middlewares
 app.use(express.json()); // Middleware para parsear bodies de solicitud JSON
 // app.use(cors());
+
+
+const authenticate = async (req, res, next) => {
+    const idToken = req.headers.authorization ? req.headers.authorization.split('Bearer ')[1] : null;
+
+    if (!idToken) {
+        return res.status(401).json({ success: false, message: 'No autorizado: No se proporcionó token.' });
+    }
+
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        req.user = decodedToken; // Agrega los datos del usuario autenticado a la solicitud
+        next(); // Continúa con la siguiente función de middleware/ruta
+    } catch (error) {
+        console.error('Error al verificar el token de autenticación:', error);
+        return res.status(403).json({ success: false, message: 'No autorizado: Token inválido o expirado.' });
+    }
+};
 
 app.use(cors({
     origin: ['http://127.0.0.1:3000', 'http://localhost:3000', 'https://tu-dominio-frontend-en-render.onrender.com'], 
@@ -81,8 +111,12 @@ app.use(cors({
 
 
 // --- ENDPOINT PARA VALIDAR EL CORREO ELECTRÓNICO CON FAUCETPAY ---
-app.post('/api/validate-faucetpay-email', async (req, res) => {
+// Aplica el middleware 'authenticate' a esta ruta
+app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
     const { email } = req.body;
+    // req.user ahora contiene el UID del usuario, puedes usarlo para auditoría si es necesario
+    const userId = req.user.uid; 
+    console.log(`Validando FaucetPay email para ${userId}: ${email}`);
 
     if (!email) {
         return res.status(400).json({ success: false, message: 'Email es requerido.' });
@@ -109,6 +143,8 @@ app.post('/api/validate-faucetpay-email', async (req, res) => {
         console.log("Respuesta de FaucetPay:", faucetPayData);
 
         if (faucetPayData.status === 200 && faucetPayData.message === "OK") {
+            // Si FaucetPay valida el correo, puedes opcionalmente guardarlo aquí en tu DB
+            // db.ref(`users/${userId}`).update({ faucetPayEmail: email });
             res.json({
                 success: true,
                 message: 'Correo electrónico validado con éxito en FaucetPay.',
@@ -135,119 +171,150 @@ app.post('/api/validate-faucetpay-email', async (req, res) => {
 });
 
 // --- ENDPOINT PARA PROCESAR EL RETIRO ---
-app.post('/api/request-faucetpay-withdrawal', async (req, res) => {
-    const { email, amount, userId } = req.body;
+// Aplica el middleware 'authenticate' a esta ruta
+app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => {
+    // El userId ahora viene del token autenticado, no del body (más seguro)
+    const userId = req.user.uid;
+    const { email, amount } = req.body; // 'email' debería ser el email de FaucetPay que el usuario tiene guardado en tu DB
+                                        // 'amount' es el monto en LTC (decimal) desde el frontend
 
-    if (!email || !amount || !userId) {
-        return res.status(400).json({ success: false, message: 'Email/dirección, monto y ID de usuario son requeridos para el retiro.' });
+    if (!email || !amount) {
+        return res.status(400).json({ success: false, message: 'Email/dirección y monto son requeridos para el retiro.' });
     }
 
-    // 1. Convertir el monto recibido del frontend (LTC decimal) a Litoshis (entero)
-    const withdrawalAmountLTC = parseFloat(amount); // Ejemplo: 0.0002 LTC
+    const withdrawalAmountLTC = parseFloat(amount);
     if (isNaN(withdrawalAmountLTC) || withdrawalAmountLTC <= 0) {
         return res.status(400).json({ success: false, message: 'Monto de retiro inválido.' });
     }
-    const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * 100_000_000); // Ejemplo: 20000 Litoshis
+    const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * LTC_TO_LITOSHIS_FACTOR);
 
-    // 2. Definir la comisión SIEMPRE en Litoshis (entero)
-    const WITHDRAWAL_FEE_LITOSHIS = 1000; // Esto representa 0.00001000 LTC
+    // Usa la constante de comisión definida globalmente
+    const WITHDRAWAL_FEE_LITOSHIS = 1000; // Esto representa 0.00001000 LTC - ASEGÚRATE DE QUE ESTA CONSTANTE TAMBIÉN ESTÉ EN EL TOP DEL server.js
+    const MIN_WITHDRAWAL_LITOSHIS_BACKEND = 100000; // 0.001 LTC. Defínelo también al inicio de server.js
 
-    // 3. Calcular el costo total en Litoshis (entero)
+    // Validar monto mínimo en el backend también
+    if (withdrawalAmountLitoshis < MIN_WITHDRAWAL_LITOSHIS_BACKEND) {
+        return res.status(400).json({ success: false, message: `La cantidad mínima de retiro es ${ (MIN_WITHDRAWAL_LITOSHIS_BACKEND / LTC_TO_LITOSHIS_FACTOR).toFixed(8) } LTC.` });
+    }
+
+
     const totalCostLitoshis = withdrawalAmountLitoshis + WITHDRAWAL_FEE_LITOSHIS;
 
-    // Referencia al nodo del usuario específico en tu base de datos de Firebase.
     const userRef = db.ref(`users/${userId}`);
 
-    try {
-        // 4. Obtener el balance actual del usuario de Firebase.
-        // ASUMIMOS que el balance en Firebase ya está o se va a migrar a Litoshis (enteros).
-        const snapshot = await userRef.once('value');
-        const userData = snapshot.val();
-        const currentBalanceLitoshis = userData.balance || 0; // Lee el balance como Litoshis
+    // Usar una transacción para asegurar la integridad del balance
+    const transactionResult = await userRef.transaction(currentData => {
+        if (currentData) {
+            const currentBalanceLitoshis = currentData.balance || 0;
+            const storedFaucetPayEmail = currentData.faucetPayEmail;
 
-        // 5. Verificar si el balance es suficiente (todos los valores son Litoshis enteros)
-        if (currentBalanceLitoshis < totalCostLitoshis) {
-            console.warn(`Intento de retiro fallido para ${userId}: balance insuficiente. Solicitado (Litoshis): ${totalCostLitoshis}, Actual (Litoshis): ${currentBalanceLitoshis}`);
-            return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro.' });
+            // Vuelve a verificar que el email enviado por el cliente coincide con el guardado
+            if (storedFaucetPayEmail !== email) {
+                console.warn(`Discrepancia de email FaucetPay para ${userId}: Cliente envió '${email}', DB tiene '${storedFaucetPayEmail}'.`);
+                // Podrías devolver undefined para abortar la transacción o manejarlo como error
+                return; // Aborta la transacción
+            }
+
+            if (currentBalanceLitoshis >= totalCostLitoshis) {
+                currentData.balance = currentBalanceLitoshis - totalCostLitoshis;
+                return currentData; // Retorna el nuevo estado para que Firebase lo actualice
+            } else {
+                console.warn(`Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}`);
+                // Podrías devolver undefined o lanzar un error específico si transaction soporta eso directamente
+            }
         }
+        return; // Aborta la transacción si no hay datos o balance insuficiente
+    });
 
-        // 6. Preparar y realizar la llamada a la API de FaucetPay.
-        // FaucetPay espera montos en su unidad más pequeña (Litoshis/Satoshis).
+    if (transactionResult.committed && transactionResult.snapshot.val()) {
+        const newBalanceLitoshis = transactionResult.snapshot.val().balance;
+
+        // Balance deducido, ahora procede con FaucetPay
         const FAUCETPAY_SEND_URL = 'https://faucetpay.io/api/v1/send';
-
         const formData = new URLSearchParams();
         formData.append('api_key', FAUCETPAY_API_KEY);
         formData.append('to', email);
-        formData.append('amount', withdrawalAmountLitoshis); // <-- Enviar Litoshis a FaucetPay (es lo que espera)
+        formData.append('amount', withdrawalAmountLitoshis);
         formData.append('currency', FAUCETPAY_CURRENCY);
 
         const faucetPayResponse = await fetch(FAUCETPAY_SEND_URL, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: formData,
         });
-
         const faucetPayData = await faucetPayResponse.json();
 
         console.log("Respuesta de FaucetPay (envío):", faucetPayData);
 
-        // 7. Procesar la respuesta de FaucetPay.
         if (faucetPayData.status === 200 && faucetPayData.message === "OK") {
-            // El pago a FaucetPay fue exitoso.
-
-            // 8. Actualizar el balance del usuario en Firebase (en Litoshis enteros)
-            const newBalanceLitoshis = currentBalanceLitoshis - totalCostLitoshis; // Cálculos en Litoshis
-            await userRef.update({ balance: newBalanceLitoshis }); // Guardar Litoshis en Firebase
-
-            // Log de la actualización del balance
-            console.log(`Balance de ${userId} actualizado a ${newBalanceLitoshis} Litoshis después de retiro exitoso.`);
-
-            // 9. Registrar la transacción de retiro en Firebase (manteniendo consistencia)
-            const transactionsRef = db.ref(`transactions/${userId}`);
-            await transactionsRef.push({
+            // Pago exitoso en FaucetPay
+            db.ref(`transactions/${userId}`).push({
                 type: 'withdrawal',
-                amount: withdrawalAmountLitoshis, // Registrar en Litoshis
-                fee: WITHDRAWAL_FEE_LITOSHIS,     // Registrar en Litoshis
+                amount: withdrawalAmountLitoshis,
+                fee: WITHDRAWAL_FEE_LITOSHIS,
                 faucetPayEmail: email,
                 timestamp: admin.database.ServerValue.TIMESTAMP,
                 status: 'completed',
                 faucetPayTxId: faucetPayData.payout_id || 'N/A',
-                // Si faucetPayData.balance devuelve LTC decimal, considera no guardarlo o convertirlo
-                // faucetPayBalanceAfter: faucetPayData.balance // Esto podría ser decimal de FaucetPay
             });
             console.log(`Transacción de retiro registrada para ${userId}.`);
 
-            // 10. Responder al frontend. Devuelve el nuevo balance en Litoshis enteros.
             res.json({
                 success: true,
                 message: 'Retiro procesado con éxito.',
                 payout_id: faucetPayData.payout_id,
-                balance: newBalanceLitoshis // <-- Devuelve el balance en Litoshis enteros
+                balance: newBalanceLitoshis
             });
         } else {
-            // Si FaucetPay falla, NO descontamos el balance del usuario.
-            console.error(`Fallo de FaucetPay para ${userId}:`, faucetPayData.message || 'Error desconocido');
+            // Si FaucetPay falla, debemos REVERTIR el balance en Firebase
+            console.error(`Fallo de FaucetPay para ${userId}. Revirtiendo balance. Mensaje FaucetPay: ${faucetPayData.message || 'Desconocido'}`);
+            // REVERSIÓN DEL BALANCE: Incrementar el balance del usuario nuevamente
+            await userRef.transaction(currentData => {
+                if (currentData) {
+                    currentData.balance = (currentData.balance || 0) + totalCostLitoshis;
+                    console.log(`Balance de ${userId} revertido a ${currentData.balance} Litoshis.`);
+                    return currentData;
+                }
+                return; // Abortar si no hay datos (no debería pasar)
+            });
+
+            // Opcional: registrar el intento fallido de retiro
+            db.ref(`transactions/${userId}`).push({
+                type: 'withdrawal_failed',
+                amount: withdrawalAmountLitoshis,
+                fee: WITHDRAWAL_FEE_LITOSHIS,
+                faucetPayEmail: email,
+                timestamp: admin.database.ServerValue.TIMESTAMP,
+                status: 'failed',
+                errorMessage: faucetPayData.message || 'Error desconocido de FaucetPay.',
+            });
+
             res.status(400).json({
                 success: false,
-                message: faucetPayData.message || 'Error al procesar el retiro con FaucetPay.'
+                message: faucetPayData.message || 'Error al procesar el retiro con FaucetPay. Fondos devueltos a tu balance.'
             });
         }
-
-    } catch (error) {
-        console.error(`Error interno del servidor al procesar el retiro para ${userId}:`, error);
-        res.status(500).json({ success: false, message: 'Error interno del servidor al procesar el retiro.' });
+    } else if (transactionResult.aborted) {
+        // La transacción fue abortada (ej. balance insuficiente, email no coincide)
+        if (transactionResult.snapshot && transactionResult.snapshot.val().faucetPayEmail !== email) {
+            return res.status(400).json({ success: false, message: 'El correo de FaucetPay en tu cuenta no coincide con el de la solicitud.' });
+        }
+        return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro o error interno de la base de datos.' });
+    } else {
+        // Esto puede ocurrir si el usuario no existe, o algún otro problema con la transacción
+        return res.status(500).json({ success: false, message: 'No se pudo procesar el retiro debido a un problema de la base de datos.' });
     }
+
 });
 
-// Este endpoint es llamado cuando un usuario intenta aplicar un código de referido manualmente.
-app.post('/api/apply-referral-code', async (req, res) => {
-    console.log("-> Solicitud recibida en /api/apply-referral-code");
-    const { referralCode, userId } = req.body;
+// --- ENDPOINT PARA APLICAR CÓDIGO DE REFERIDO (CON AUTENTICACIÓN) ---
+app.post('/api/apply-referral-code', authenticate, async (req, res) => {
+    // El userId ahora viene del token autenticado, no del body
+    const userId = req.user.uid;
+    const { referralCode } = req.body;
 
-    if (!userId || !referralCode) {
-        return res.status(400).json({ success: false, message: 'Faltan datos de usuario o código de referido.' });
+    if (!referralCode) {
+        return res.status(400).json({ success: false, message: 'Código de referido es requerido.' });
     }
 
     try {
@@ -260,8 +327,6 @@ app.post('/api/apply-referral-code', async (req, res) => {
             return res.status(404).json({ success: false, message: 'Usuario actual no encontrado.' });
         }
 
-        // Validación: El usuario ya ha sido referido o ya ha reclamado una recompensa.
-        // Asegúrate de que 'referredByCode' y 'referralClaimed' existan y sean booleanos o se manejen como tal.
         if (referredUserData.referredByCode || referredUserData.referralClaimed) {
             console.log(`[REFERRAL_ENDPOINT] Ya ha utilizado código: ${userId}`);
             return res.status(400).json({ success: false, message: 'Ya has utilizado un código de referido o ya reclamaste la recompensa.' });
@@ -284,34 +349,42 @@ app.post('/api/apply-referral-code', async (req, res) => {
             return res.status(400).json({ success: false, message: 'No puedes referirte a ti mismo.' });
         }
 
-        // --- Aplicar recompensas y actualizar base de datos ---
+        // --- Aplicar recompensas y actualizar base de datos con transacción ---
+        // Usamos una transacción para el usuario referido para asegurar la atomicidad
+        const referredUserTransactionResult = await referredUserRef.transaction(currentReferredUserData => {
+            if (currentReferredUserData) {
+                if (currentReferredUserData.referredByCode || currentReferredUserData.referralClaimed) {
+                    // Si ya se aplicó en el interín, abortar.
+                    return;
+                }
+                currentReferredUserData.balance = (currentReferredUserData.balance || 0) + REFERRED_USER_REWARD_AMOUNT_LITOSHIS;
+                currentReferredUserData.referredByCode = referralCode;
+                currentReferredUserData.referralClaimed = true;
+                currentReferredUserData.referralRewardAmount = REFERRED_USER_REWARD_AMOUNT_LITOSHIS;
+                return currentReferredUserData;
+            }
+            return; // Abortar si no hay datos
+        });
 
-        // Recompensa para el usuario referido
-        const newReferredUserBalance = (referredUserData.balance || 0) + REFERRED_USER_REWARD_AMOUNT_LITOSHIS;
+        if (!referredUserTransactionResult.committed) {
+            console.error(`Transacción de referido abortada para ${userId}.`);
+            return res.status(500).json({ success: false, message: 'Error al aplicar la recompensa de referido (transacción fallida).' });
+        }
 
-        // Recompensa para el referente
-        const newReferrerBalance = (referrerData.balance || 0) + REFERRER_REWARD_AMOUNT_LITOSHIS;
-
-        // Usar un update para una operación atómica
-        const updates = {
-            [`users/${userId}/balance`]: newReferredUserBalance,
-            [`users/${userId}/referredByCode`]: referralCode, // <--- GUARDAR EL CÓDIGO POR EL QUE FUE REFERIDO
-            [`users/${userId}/referralClaimed`]: true,      // <--- MARCAR COMO RECLAMADO
-            [`users/${userId}/referralRewardAmount`]: REFERRED_USER_REWARD_AMOUNT_LITOSHIS, // <--- GUARDAR LA CANTIDAD GANADA
-            [`users/${referrerUid}/balance`]: newReferrerBalance,
-            [`users/${referrerUid}/referralsCount`]: admin.database.ServerValue.increment(1) // Incrementar contador de referidos del referente
-        };
-
-        await db.ref().update(updates); // Ejecuta todas las actualizaciones a la vez
+        // Actualizar balance del referente y contador (no necesitamos transacción aquí si solo es un incremento simple)
+        const referrerRef = db.ref(`users/${referrerUid}`);
+        await referrerRef.update({
+            balance: (referrerData.balance || 0) + REFERRER_REWARD_AMOUNT_LITOSHIS,
+            referralsCount: admin.database.ServerValue.increment(1)
+        });
 
         console.log(`[REFERRAL_ENDPOINT] Recompensa aplicada para ${userId} (referido) y ${referrerUid} (referente).`);
 
-        // RESPUESTA DE ÉXITO: Incluye el código del referente y la recompensa
         return res.status(200).json({
             success: true,
             message: '¡Código de referido aplicado con éxito! Has ganado Litoshis.',
-            referredByCode: referralCode, // Envía el código de vuelta
-            referralRewardAmount: REFERRED_USER_REWARD_AMOUNT_LITOSHIS // Envía la cantidad de recompensa
+            referredByCode: referralCode,
+            referralRewardAmount: REFERRED_USER_REWARD_AMOUNT_LITOSHIS
         });
 
     } catch (error) {
@@ -319,7 +392,7 @@ app.post('/api/apply-referral-code', async (req, res) => {
         return res.status(500).json({ success: false, message: 'Error interno del servidor al aplicar el código de referido.' });
     }
 });
-// --- FIN NUEVO: ENDPOINT: /api/apply-referral ---
+
 
 
 // Inicia el servidor Express
