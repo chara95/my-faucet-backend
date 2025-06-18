@@ -67,7 +67,7 @@ const db = admin.database();
 const LTC_TO_LITOSHIS_FACTOR = 100_000_000;
 // Comision de retiro
 const WITHDRAWAL_FEE_LITOSHIS = 1000; // 0.00001 LTC
-const MIN_WITHDRAWAL_LITOSHIS_BACKEND = 1000; // 0.0001 LTC
+const MIN_WITHDRAWAL_LITOSHIS_BACKEND = 1000; // 0.00001 LTC (mínimo de retiro en Litoshis)
 const REFERRED_USER_REWARD_AMOUNT_LITOSHIS = 200; // 0.00002 LTC en Litoshis
 const REFERRER_REWARD_AMOUNT_LITOSHIS = 200;    // 0.00002 LTC en Litoshis
 
@@ -174,6 +174,13 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
 // Aplica el middleware 'authenticate' a esta ruta
 app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => {
     // El userId ahora viene del token autenticado, no del body (más seguro)
+
+    console.log('¡Solicitud de retiro recibida!'); // <-- AÑADE ESTA LÍNEA
+    console.log('Body de la solicitud:', req.body); // <-- Y ESTA PARA VER LOS DATOS
+    console.log('userID de la solicitud:', req.user.uid);
+    console.log('MINIMO DE RETIRO:', MIN_WITHDRAWAL_LITOSHIS_BACKEND / LTC_TO_LITOSHIS_FACTOR, 'LTC'); // <-- Y ESTA PARA VER EL MÍNIMO DE RETIRO
+
+
     const userId = req.user.uid;
     const { email, amount } = req.body; // 'email' debería ser el email de FaucetPay que el usuario tiene guardado en tu DB
                                         // 'amount' es el monto en LTC (decimal) desde el frontend
@@ -186,7 +193,7 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     if (isNaN(withdrawalAmountLTC) || withdrawalAmountLTC <= 0) {
         return res.status(400).json({ success: false, message: 'Monto de retiro inválido.' });
     }
-    const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * LTC_TO_LITOSHIS_FACTOR);
+    const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * LTC_TO_LITOSHIS_FACTOR); // Convertir LTC a Litoshis
 
    
 
