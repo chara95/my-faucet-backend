@@ -188,9 +188,7 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     }
     const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * LTC_TO_LITOSHIS_FACTOR);
 
-    // Usa la constante de comisión definida globalmente
-    const WITHDRAWAL_FEE_LITOSHIS = 1000; // Esto representa 0.00001000 LTC - ASEGÚRATE DE QUE ESTA CONSTANTE TAMBIÉN ESTÉ EN EL TOP DEL server.js
-    const MIN_WITHDRAWAL_LITOSHIS_BACKEND = 100000; // 0.001 LTC. Defínelo también al inicio de server.js
+   
 
     // Validar monto mínimo en el backend también
     if (withdrawalAmountLitoshis < MIN_WITHDRAWAL_LITOSHIS_BACKEND) {
