@@ -158,7 +158,9 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
     }
 });
 
+
 // --- ENDPOINT PARA PROCESAR EL RETIRO ---
+// Aplica el middleware 'authenticate' a esta ruta
 app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => {
     console.log('¡Solicitud de retiro recibida!');
 
@@ -175,6 +177,7 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     }
     const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * LTC_TO_LITOSHIS_FACTOR);
 
+    // Validar monto mínimo en el backend también
     if (withdrawalAmountLitoshis < MIN_WITHDRAWAL_LITOSHIS_BACKEND) {
         return res.status(400).json({ success: false, message: `La cantidad mínima de retiro es ${(MIN_WITHDRAWAL_LITOSHIS_BACKEND / LTC_TO_LITOSHIS_FACTOR).toFixed(8)} LTC.` });
     }
@@ -188,7 +191,7 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
         const snapshot = await userRef.once('value');
         if (snapshot.exists()) {
             const userData = snapshot.val();
-            console.log("TEST_LECTURA_DIRECTA: Datos del usuario encontrados:", userData);
+            console.log("TEST_LECTURA_DIRECTA: Datos del usuario encontrados:", userData); // Log de datos encontrados
             if (userData.balance === undefined || userData.faucetPayEmail === undefined) {
                 console.warn("TEST_LECTURA_DIRECTA: El usuario existe pero le faltan campos clave (balance/faucetPayEmail).");
             }
@@ -201,39 +204,44 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     // --- FIN PRUEBA DE LECTURA DIRECTA ---
 
     // Usar una transacción para asegurar la integridad del balance
-    console.log("La transacción intenta acceder a:", userRef.toString());
+    console.log("La transacción intenta acceder a:", userRef.toString()); // Log de la ruta a la que se intenta acceder
     const transactionResult = await userRef.transaction(currentData => {
         console.log("Transacción - currentData dentro del callback:", currentData); // Log dentro del callback de la transacción
 
-        if (currentData) {
-            const currentBalanceLitoshis = currentData.balance || 0;
-            const storedFaucetPayEmail = currentData.faucetPayEmail;
+        try { // <--- AÑADIDO: Bloque try para capturar errores dentro del callback
+            if (currentData) {
+                const currentBalanceLitoshis = currentData.balance || 0;
+                const storedFaucetPayEmail = currentData.faucetPayEmail;
 
-            // Debug logs dentro de la transacción
-            console.log("Transacción - currentBalanceLitoshis:", currentBalanceLitoshis);
-            console.log("Transacción - storedFaucetPayEmail:", storedFaucetPayEmail);
-            console.log("Transacción - email de solicitud:", email);
-            console.log("Transacción - totalCostLitoshis:", totalCostLitoshis);
+                // Debug logs dentro de la transacción
+                console.log("Transacción - currentBalanceLitoshis:", currentBalanceLitoshis);
+                console.log("Transacción - storedFaucetPayEmail:", storedFaucetPayEmail);
+                console.log("Transacción - email de solicitud:", email);
+                console.log("Transacción - totalCostLitoshis:", totalCostLitoshis);
 
-            if (storedFaucetPayEmail !== email) {
-                console.warn(`Discrepancia de email FaucetPay para ${userId}: Cliente envió '${email}', DB tiene '${storedFaucetPayEmail}'. ABORTANDO.`);
-                return; // Aborta la transacción si los emails no coinciden
-            }
+                if (storedFaucetPayEmail !== email) {
+                    console.warn(`Discrepancia de email FaucetPay para ${userId}: Cliente envió '${email}', DB tiene '${storedFaucetPayEmail}'. ABORTANDO.`);
+                    return; // Aborta la transacción si los emails no coinciden
+                }
 
-            if (currentBalanceLitoshis >= totalCostLitoshis) {
-                console.log(`Balance suficiente. Actualizando balance de ${currentBalanceLitoshis} a ${currentBalanceLitoshis - totalCostLitoshis}`);
-                currentData.balance = currentBalanceLitoshis - totalCostLitoshis;
-                return currentData; // Retorna el nuevo estado para que Firebase lo actualice
+                if (currentBalanceLitoshis >= totalCostLitoshis) {
+                    console.log(`Balance suficiente. Actualizando balance de ${currentBalanceLitoshis} a ${currentBalanceLitoshis - totalCostLitoshis}`);
+                    currentData.balance = currentBalanceLitoshis - totalCostLitoshis;
+                    return currentData; // Retorna el nuevo estado para que Firebase lo actualice
+                } else {
+                    console.warn(`Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
+                }
             } else {
-                console.warn(`Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
+                console.error(`ERROR en transacción: No se encontraron datos para el usuario ${userId} en la base de datos. ABORTANDO.`); // Log del error si no hay datos
             }
-        } else {
-            console.error(`ERROR en transacción: No se encontraron datos para el usuario ${userId} en la base de datos. ABORTANDO.`);
+            return; // Aborta la transacción si no hay datos o si alguna de las condiciones previas hizo que se saltara el 'return currentData'
+        } catch (transactionCallbackError) { // <--- AÑADIDO: Bloque catch para errores en el callback
+            console.error(`ERROR INESPERADO DENTRO DEL CALLBACK DE TRANSACCIÓN para ${userId}:`, transactionCallbackError);
+            return; // Aborta la transacción
         }
-        return; // Aborta la transacción si no hay datos o si alguna de las condiciones previas hizo que se saltara el 'return currentData'
     });
 
-    console.log("Resultado COMPLETO de la transacción de Firebase:", transactionResult);
+    console.log("Resultado COMPLETO de la transacción de Firebase:", transactionResult); // Log del resultado completo de la transacción
 
     if (transactionResult.committed && transactionResult.snapshot && transactionResult.snapshot.val()) {
         const newBalanceLitoshis = transactionResult.snapshot.val().balance;
@@ -314,6 +322,10 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
         return res.status(500).json({ success: false, message: 'No se pudo procesar el retiro debido a un problema de la base de datos.' });
     }
 });
+
+
+
+
 
 // --- ENDPOINT PARA APLICAR CÓDIGO DE REFERIDO (CON AUTENTICACIÓN) ---
 app.post('/api/apply-referral-code', authenticate, async (req, res) => {
