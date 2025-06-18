@@ -60,6 +60,7 @@ try {
 
 // Obtiene una referencia a la Realtime Database
 const db = admin.database();
+console.log("Firebase Admin SDK inicializado correctamente. Conectado a DB:", admin.app().options.databaseURL);
 // --- FIN NUEVO: CONFIGURACIÓN DE FIREBASE ADMIN SDK ---
 
 // === CONSTANTES EN EL BACKEND (MANTENER SINCRONIZADAS) ===
