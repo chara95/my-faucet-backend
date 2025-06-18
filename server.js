@@ -209,8 +209,12 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     const totalCostLitoshis = withdrawalAmountLitoshis + WITHDRAWAL_FEE_LITOSHIS;
 
     const userRef = db.ref(`users/${userId}`);
+    console.log("Transacción - currentData:", currentData);
+
+
 
     // Usar una transacción para asegurar la integridad del balance
+    console.log("La transacción intenta acceder a:", userRef.toString());
    const transactionResult = await userRef.transaction(currentData => {
     console.log("Transacción - currentData:", currentData); // ¿Es null? (Ya sabemos que no, pero para confirmar)
     if (currentData) {
