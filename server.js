@@ -159,8 +159,7 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
 });
 
 
-// --- ENDPOINT PARA PROCESAR EL RETIRO ---
-// Aplica el middleware 'authenticate' a esta ruta
+// --- ENDPOINT PARA PROCESAR EL RETIRO (SEGURO Y CONDICIONAL) ---
 app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => {
     console.log('¡Solicitud de retiro recibida!');
 
@@ -177,7 +176,6 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     }
     const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * LTC_TO_LITOSHIS_FACTOR);
 
-    // Validar monto mínimo en el backend también
     if (withdrawalAmountLitoshis < MIN_WITHDRAWAL_LITOSHIS_BACKEND) {
         return res.status(400).json({ success: false, message: `La cantidad mínima de retiro es ${(MIN_WITHDRAWAL_LITOSHIS_BACKEND / LTC_TO_LITOSHIS_FACTOR).toFixed(8)} LTC.` });
     }
@@ -186,74 +184,48 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
 
     const userRef = db.ref(`users/${userId}`);
 
-    // --- PRUEBA DE LECTURA DIRECTA ANTES DE LA TRANSACCIÓN ---
+    // --- 1. Leer datos del usuario (saldo y email de FaucetPay) ---
+    let currentBalanceLitoshis;
+    let storedFaucetPayEmail;
     try {
-        const snapshot = await userRef.once('value');
+        const snapshot = await userRef.once('value'); // Lectura directa que sabemos que funciona
         if (snapshot.exists()) {
             const userData = snapshot.val();
-            console.log("TEST_LECTURA_DIRECTA: Datos del usuario encontrados:", userData); // Log de datos encontrados
-            if (userData.balance === undefined || userData.faucetPayEmail === undefined) {
-                console.warn("TEST_LECTURA_DIRECTA: El usuario existe pero le faltan campos clave (balance/faucetPayEmail).");
-            }
+            currentBalanceLitoshis = userData.balance || 0;
+            storedFaucetPayEmail = userData.faucetPayEmail;
+            console.log(`Datos del usuario ${userId} leídos:`, userData);
         } else {
-            console.error("TEST_LECTURA_DIRECTA: El snapshot no existe. NO SE ENCONTRARON DATOS DEL USUARIO POR LECTURA DIRECTA.");
+            console.error(`Error: Datos de usuario no encontrados para ${userId}.`);
+            return res.status(404).json({ success: false, message: 'Datos de usuario no encontrados.' });
         }
     } catch (readError) {
-        console.error("TEST_LECTURA_DIRECTA: Error al intentar leer directamente los datos del usuario:", readError);
+        console.error(`Error al leer datos del usuario ${userId}:`, readError);
+        return res.status(500).json({ success: false, message: 'Error interno al verificar datos del usuario.' });
     }
-    // --- FIN PRUEBA DE LECTURA DIRECTA ---
 
-    // Usar una transacción para asegurar la integridad del balance
-    console.log("La transacción intenta acceder a:", userRef.toString()); // Log de la ruta a la que se intenta acceder
-    const transactionResult = await userRef.transaction(currentData => {
-        console.log("Transacción - currentData dentro del callback:", currentData); // Log dentro del callback de la transacción
+    // --- 2. Validaciones de Seguridad en Backend ---
+    if (storedFaucetPayEmail !== email) {
+        console.warn(`Discrepancia de email FaucetPay para ${userId}: Cliente envió '${email}', DB tiene '${storedFaucetPayEmail}'. ABORTANDO.`);
+        return res.status(400).json({ success: false, message: 'El correo de FaucetPay en tu cuenta no coincide con el de la solicitud.' });
+    }
 
-        try { // <--- AÑADIDO: Bloque try para capturar errores dentro del callback
-            if (currentData) {
-                const currentBalanceLitoshis = currentData.balance || 0;
-                const storedFaucetPayEmail = currentData.faucetPayEmail;
+    // Re-validación del saldo en el backend (muy importante, no confíes solo en el frontend)
+    if (currentBalanceLitoshis < totalCostLitoshis) {
+        console.warn(`Backend: Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
+        return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro en el backend.' });
+    }
 
-                // Debug logs dentro de la transacción
-                console.log("Transacción - currentBalanceLitoshis:", currentBalanceLitoshis);
-                console.log("Transacción - storedFaucetPayEmail:", storedFaucetPayEmail);
-                console.log("Transacción - email de solicitud:", email);
-                console.log("Transacción - totalCostLitoshis:", totalCostLitoshis);
+    // --- 3. Enviar solicitud a FaucetPay ---
+    const FAUCETPAY_SEND_URL = 'https://faucetpay.io/api/v1/send';
+    const formData = new URLSearchParams();
+    formData.append('api_key', FAUCETPAY_API_KEY);
+    formData.append('to', email);
+    formData.append('amount', withdrawalAmountLitoshis);
+    formData.append('currency', FAUCETPAY_CURRENCY);
 
-                if (storedFaucetPayEmail !== email) {
-                    console.warn(`Discrepancia de email FaucetPay para ${userId}: Cliente envió '${email}', DB tiene '${storedFaucetPayEmail}'. ABORTANDO.`);
-                    return; // Aborta la transacción si los emails no coinciden
-                }
+    console.log(`Enviando solicitud de retiro a FaucetPay para ${userId} (Email: ${email}, Monto: ${withdrawalAmountLitoshis} Litoshis)...`);
 
-                if (currentBalanceLitoshis >= totalCostLitoshis) {
-                    console.log(`Balance suficiente. Actualizando balance de ${currentBalanceLitoshis} a ${currentBalanceLitoshis - totalCostLitoshis}`);
-                    currentData.balance = currentBalanceLitoshis - totalCostLitoshis;
-                    return currentData; // Retorna el nuevo estado para que Firebase lo actualice
-                } else {
-                    console.warn(`Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
-                }
-            } else {
-                console.error(`ERROR en transacción: No se encontraron datos para el usuario ${userId} en la base de datos. ABORTANDO.`); // Log del error si no hay datos
-            }
-            return; // Aborta la transacción si no hay datos o si alguna de las condiciones previas hizo que se saltara el 'return currentData'
-        } catch (transactionCallbackError) { // <--- AÑADIDO: Bloque catch para errores en el callback
-            console.error(`ERROR INESPERADO DENTRO DEL CALLBACK DE TRANSACCIÓN para ${userId}:`, transactionCallbackError);
-            return; // Aborta la transacción
-        }
-    });
-
-    console.log("Resultado COMPLETO de la transacción de Firebase:", transactionResult); // Log del resultado completo de la transacción
-
-    if (transactionResult.committed && transactionResult.snapshot && transactionResult.snapshot.val()) {
-        const newBalanceLitoshis = transactionResult.snapshot.val().balance;
-
-        // Balance deducido, ahora procede con FaucetPay
-        const FAUCETPAY_SEND_URL = 'https://faucetpay.io/api/v1/send';
-        const formData = new URLSearchParams();
-        formData.append('api_key', FAUCETPAY_API_KEY);
-        formData.append('to', email);
-        formData.append('amount', withdrawalAmountLitoshis);
-        formData.append('currency', FAUCETPAY_CURRENCY);
-
+    try {
         const faucetPayResponse = await fetch(FAUCETPAY_SEND_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -263,63 +235,80 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
 
         console.log("Respuesta de FaucetPay (envío):", faucetPayData);
 
+        // --- 4. Procesar respuesta de FaucetPay y Actualizar Firebase Condicionalmente ---
         if (faucetPayData.status === 200 && faucetPayData.message === "OK") {
-            // Pago exitoso en FaucetPay
-            db.ref(`transactions/${userId}`).push({
-                type: 'withdrawal',
-                amount: withdrawalAmountLitoshis,
-                fee: WITHDRAWAL_FEE_LITOSHIS,
-                faucetPayEmail: email,
-                timestamp: admin.database.ServerValue.TIMESTAMP,
-                status: 'completed',
-                faucetPayTxId: faucetPayData.payout_id || 'N/A',
-            });
-            console.log(`Transacción de retiro registrada para ${userId}.`);
+            // **FAUCETPAY OK**: Deduce el saldo y registra la transacción exitosa
+            console.log(`Pago FaucetPay exitoso. Deduciendo balance de ${userId} y registrando transacción.`);
 
-            res.json({
-                success: true,
-                message: 'Retiro procesado con éxito.',
-                payout_id: faucetPayData.payout_id,
-                balance: newBalanceLitoshis
-            });
+            const newBalanceAfterWithdrawal = currentBalanceLitoshis - totalCostLitoshis;
+
+            try {
+                // Actualiza el campo 'balance' directamente (sin transaction)
+                await userRef.update({
+                    balance: newBalanceAfterWithdrawal
+                });
+                console.log(`Balance de ${userId} actualizado a ${newBalanceAfterWithdrawal} Litoshis.`);
+
+                // Registra la transacción como completada
+                db.ref(`transactions/${userId}`).push({
+                    type: 'withdrawal',
+                    amount: withdrawalAmountLitoshis,
+                    fee: WITHDRAWAL_FEE_LITOSHIS,
+                    faucetPayEmail: email,
+                    timestamp: admin.database.ServerValue.TIMESTAMP,
+                    status: 'completed',
+                    faucetPayTxId: faucetPayData.payout_id || 'N/A',
+                });
+                console.log(`Transacción de retiro exitosa registrada para ${userId}.`);
+
+                res.json({
+                    success: true,
+                    message: 'Retiro procesado y balance actualizado con éxito.',
+                    payout_id: faucetPayData.payout_id,
+                    balance: newBalanceAfterWithdrawal // Envía el nuevo balance al frontend
+                });
+
+            } catch (firebaseUpdateError) {
+                // FaucetPay fue OK, pero la deducción de balance en Firebase falló.
+                // ESTO ES CRÍTICO: Registra el incidente y alerta.
+                console.error(`Advertencia CRÍTICA: FaucetPay exitoso, pero la deducción de balance en Firebase falló para ${userId}:`, firebaseUpdateError);
+                db.ref(`transactions/${userId}`).push({
+                    type: 'withdrawal_firebase_deduction_failed_after_faucetpay_ok',
+                    amount: withdrawalAmountLitoshis,
+                    fee: WITHDRAWAL_FEE_LITOSHIS,
+                    faucetPayEmail: email,
+                    timestamp: admin.database.ServerValue.TIMESTAMP,
+                    status: 'error_balance_deduction',
+                    faucetPayTxId: faucetPayData.payout_id || 'N/A',
+                    errorMessage: 'Deducción de balance falló en Firebase después de pago OK en FaucetPay.'
+                });
+                res.status(500).json({
+                    success: false,
+                    message: 'Error crítico: Pago realizado en FaucetPay, pero el balance no pudo ser actualizado. Contacta al soporte.'
+                });
+            }
+
         } else {
-            // Si FaucetPay falla, debemos REVERTIR el balance en Firebase
-            console.error(`Fallo de FaucetPay para ${userId}. Revirtiendo balance. Mensaje FaucetPay: ${faucetPayData.message || 'Desconocido'}`);
-            // REVERSIÓN DEL BALANCE: Incrementar el balance del usuario nuevamente
-            await userRef.transaction(currentData => {
-                if (currentData) {
-                    currentData.balance = (currentData.balance || 0) + totalCostLitoshis;
-                    console.log(`Balance de ${userId} revertido a ${currentData.balance} Litoshis.`);
-                    return currentData;
-                }
-                return; // Abortar si no hay datos (no debería pasar si transactionResult.committed fue true antes)
-            });
-
+            // **FAUCETPAY FALLÓ**: NO deduce el saldo. Solo registra la transacción fallida.
+            console.error(`Fallo de FaucetPay para ${userId}. NO se deduce balance. Mensaje FaucetPay: ${faucetPayData.message || 'Desconocido'}`);
             db.ref(`transactions/${userId}`).push({
-                type: 'withdrawal_failed',
+                type: 'withdrawal_failed_faucetpay',
                 amount: withdrawalAmountLitoshis,
                 fee: WITHDRAWAL_FEE_LITOSHIS,
                 faucetPayEmail: email,
                 timestamp: admin.database.ServerValue.TIMESTAMP,
-                status: 'failed',
+                status: 'failed_external',
                 errorMessage: faucetPayData.message || 'Error desconocido de FaucetPay.',
             });
-
             res.status(400).json({
                 success: false,
-                message: faucetPayData.message || 'Error al procesar el retiro con FaucetPay. Fondos devueltos a tu balance.'
+                message: faucetPayData.message || 'Error al procesar el retiro con FaucetPay. Tus fondos no fueron afectados.'
             });
         }
-    } else if (transactionResult.aborted) {
-        // La transacción fue abortada (ej. balance insuficiente, email no coincide)
-        // Puedes refinar los mensajes de error aquí basándote en la lógica dentro de tu transacción
-        if (transactionResult.snapshot && transactionResult.snapshot.val() && transactionResult.snapshot.val().faucetPayEmail !== email) {
-            return res.status(400).json({ success: false, message: 'El correo de FaucetPay en tu cuenta no coincide con el de la solicitud.' });
-        }
-        return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro o error interno de la base de datos.' });
-    } else {
-        // Esto puede ocurrir si el usuario no existe, o algún otro problema con la transacción
-        return res.status(500).json({ success: false, message: 'No se pudo procesar el retiro debido a un problema de la base de datos.' });
+    } catch (faucetPayNetworkError) {
+        // Error de red/conexión al comunicarse con FaucetPay.
+        console.error(`Error de red/conexión al comunicarse con FaucetPay para ${userId}:`, faucetPayNetworkError);
+        res.status(500).json({ success: false, message: 'Error de conexión con el servicio de retiro. Intenta de nuevo más tarde.' });
     }
 });
 
@@ -328,85 +317,214 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
 
 
 // --- ENDPOINT PARA APLICAR CÓDIGO DE REFERIDO (CON AUTENTICACIÓN) ---
-app.post('/api/apply-referral-code', authenticate, async (req, res) => {
-    const userId = req.user.uid;
-    const { referralCode } = req.body;
+// Asegúrate de que admin y db estén inicializados al inicio de tu server.js
+// const admin = require('firebase-admin');
+// const db = admin.database();
 
-    if (!referralCode) {
-        return res.status(400).json({ success: false, message: 'Código de referido es requerido.' });
+// --- ENDPOINT PARA PROCESAR EL RETIRO (SEGURO Y CONDICIONAL) ---
+app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => {
+    console.log('¡Solicitud de retiro recibida!');
+
+    const userId = req.user.uid;
+    const { email, amount } = req.body;
+
+    if (!email || !amount) {
+        return res.status(400).json({ success: false, message: 'Email/dirección y monto son requeridos para el retiro.' });
     }
 
+    const withdrawalAmountLTC = parseFloat(amount);
+    if (isNaN(withdrawalAmountLTC) || withdrawalAmountLTC <= 0) {
+        return res.status(400).json({ success: false, message: 'Monto de retiro inválido.' });
+    }
+    const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * LTC_TO_LITOSHIS_FACTOR);
+
+    if (withdrawalAmountLitoshis < MIN_WITHDRAWAL_LITOSHIS_BACKEND) {
+        return res.status(400).json({ success: false, message: `La cantidad mínima de retiro es ${(MIN_WITHDRAWAL_LITOSHIS_BACKEND / LTC_TO_LITOSHIS_FACTOR).toFixed(8)} LTC.` });
+    }
+
+    const totalCostLitoshis = withdrawalAmountLitoshis + WITHDRAWAL_FEE_LITOSHIS;
+
+    const userRef = db.ref(`users/${userId}`);
+    const activitiesRef = db.ref(`activities/${userId}`); // Referencia al nodo de actividades del usuario
+
+    // --- 1. Leer datos del usuario (saldo y email de FaucetPay) ---
+    let currentBalanceLitoshis;
+    let storedFaucetPayEmail;
     try {
-        const referredUserRef = db.ref('users').child(userId);
-        const referredUserSnapshot = await referredUserRef.once('value');
-        const referredUserData = referredUserSnapshot.val();
-
-        if (!referredUserData) {
-            console.error(`Error: Usuario referido no encontrado para UID: ${userId}`);
-            return res.status(404).json({ success: false, message: 'Usuario actual no encontrado.' });
+        const snapshot = await userRef.once('value'); // Lectura directa que sabemos que funciona
+        if (snapshot.exists()) {
+            const userData = snapshot.val();
+            currentBalanceLitoshis = userData.balance || 0;
+            storedFaucetPayEmail = userData.faucetPayEmail;
+            console.log(`Datos del usuario ${userId} leídos:`, userData);
+        } else {
+            console.error(`Error: Datos de usuario no encontrados para ${userId}.`);
+            return res.status(404).json({ success: false, message: 'Datos de usuario no encontrados.' });
         }
+    } catch (readError) {
+        console.error(`Error al leer datos del usuario ${userId}:`, readError);
+        return res.status(500).json({ success: false, message: 'Error interno al verificar datos del usuario.' });
+    }
 
-        if (referredUserData.referredByCode || referredUserData.referralClaimed) {
-            console.log(`[REFERRAL_ENDPOINT] Ya ha utilizado código: ${userId}`);
-            return res.status(400).json({ success: false, message: 'Ya has utilizado un código de referido o ya reclamaste la recompensa.' });
-        }
+    // --- 2. Validaciones de Seguridad en Backend ---
+    if (storedFaucetPayEmail !== email) {
+        console.warn(`Discrepancia de email FaucetPay para ${userId}: Cliente envió '${email}', DB tiene '${storedFaucetPayEmail}'. ABORTANDO.`);
+        return res.status(400).json({ success: false, message: 'El correo de FaucetPay en tu cuenta no coincide con el de la solicitud.' });
+    }
 
-        const referrerSnapshot = await db.ref('users')
-            .orderByChild('referralCode')
-            .equalTo(referralCode)
-            .limitToFirst(1)
-            .once('value');
+    // Re-validación del saldo en el backend (muy importante, no confíes solo en el frontend)
+    if (currentBalanceLitoshis < totalCostLitoshis) {
+        console.warn(`Backend: Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
+        return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro en el backend.' });
+    }
 
-        if (!referrerSnapshot.exists()) {
-            return res.status(400).json({ success: false, message: 'Código de referido no válido.' });
-        }
+    // --- 3. Enviar solicitud a FaucetPay ---
+    const FAUCETPAY_SEND_URL = 'https://faucetpay.io/api/v1/send';
+    const formData = new URLSearchParams();
+    formData.append('api_key', FAUCETPAY_API_KEY);
+    formData.append('to', email);
+    formData.append('amount', withdrawalAmountLitoshis);
+    formData.append('currency', FAUCETPAY_CURRENCY);
 
-        const referrerUid = Object.keys(referrerSnapshot.val())[0];
-        const referrerData = referrerSnapshot.val()[referrerUid];
+    console.log(`Enviando solicitud de retiro a FaucetPay para ${userId} (Email: ${email}, Monto: ${withdrawalAmountLitoshis} Litoshis)...`);
 
-        if (userId === referrerUid) {
-            return res.status(400).json({ success: false, message: 'No puedes referirte a ti mismo.' });
-        }
+    try {
+        const faucetPayResponse = await fetch(FAUCETPAY_SEND_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: formData,
+        });
+        const faucetPayData = await faucetPayResponse.json();
 
-        // --- Aplicar recompensas y actualizar base de datos con transacción ---
-        const referredUserTransactionResult = await referredUserRef.transaction(currentReferredUserData => {
-            if (currentReferredUserData) {
-                if (currentReferredUserData.referredByCode || currentReferredUserData.referralClaimed) {
-                    return; // Si ya se aplicó en el interín, abortar.
-                }
-                currentReferredUserData.balance = (currentReferredUserData.balance || 0) + REFERRED_USER_REWARD_AMOUNT_LITOSHIS;
-                currentReferredUserData.referredByCode = referralCode;
-                currentReferredUserData.referralClaimed = true;
-                currentReferredUserData.referralRewardAmount = REFERRED_USER_REWARD_AMOUNT_LITOSHIS;
-                return currentReferredUserData;
+        console.log("Respuesta de FaucetPay (envío):", faucetPayData);
+
+        // --- 4. Procesar respuesta de FaucetPay y Actualizar Firebase Condicionalmente ---
+        if (faucetPayData.status === 200 && faucetPayData.message === "OK") {
+            // **FAUCETPAY OK**: Deduce el saldo y registra la transacción exitosa
+            console.log(`Pago FaucetPay exitoso. Deduciendo balance de ${userId} y registrando transacción.`);
+
+            const newBalanceAfterWithdrawal = currentBalanceLitoshis - totalCostLitoshis;
+
+            try {
+                // Actualiza el campo 'balance' directamente (sin transaction)
+                await userRef.update({
+                    balance: newBalanceAfterWithdrawal
+                });
+                console.log(`Balance de ${userId} actualizado a ${newBalanceAfterWithdrawal} Litoshis.`);
+
+                // Registrar la transacción en nodo 'transactions'
+                db.ref(`transactions/${userId}`).push({
+                    type: 'withdrawal',
+                    amount: withdrawalAmountLitoshis,
+                    fee: WITHDRAWAL_FEE_LITOSHIS,
+                    faucetPayEmail: email,
+                    timestamp: admin.database.ServerValue.TIMESTAMP,
+                    status: 'completed',
+                    faucetPayTxId: faucetPayData.payout_id || 'N/A',
+                });
+                console.log(`Transacción de retiro exitosa registrada en 'transactions' para ${userId}.`);
+
+                // ****** REGISTRAR ACTIVIDAD EN NODO 'activities' ******
+                await activitiesRef.push({
+                    type: 'Retiro',
+                    amount: withdrawalAmountLitoshis,
+                    currency: FAUCETPAY_CURRENCY,
+                    status: 'Completado',
+                    timestamp: admin.database.ServerValue.TIMESTAMP,
+                    message: `Retiro de ${withdrawalAmountLTC.toFixed(8)} LTC a ${email} completado.`,
+                    txId: faucetPayData.payout_id || 'N/A' // ID de la transacción de FaucetPay
+                });
+                console.log(`Actividad de retiro exitosa registrada en 'activities' para ${userId}.`);
+                // ******************************************************
+
+                res.json({
+                    success: true,
+                    message: 'Retiro procesado y balance actualizado con éxito.',
+                    payout_id: faucetPayData.payout_id,
+                    balance: newBalanceAfterWithdrawal // Envía el nuevo balance al frontend
+                });
+
+            } catch (firebaseUpdateError) {
+                // FaucetPay fue OK, pero la deducción de balance en Firebase falló.
+                // ESTO ES CRÍTICO: Registra el incidente y alerta.
+                console.error(`Advertencia CRÍTICA: FaucetPay exitoso, pero la deducción de balance en Firebase falló para ${userId}:`, firebaseUpdateError);
+                db.ref(`transactions/${userId}`).push({
+                    type: 'withdrawal_firebase_deduction_failed_after_faucetpay_ok',
+                    amount: withdrawalAmountLitoshis,
+                    fee: WITHDRAWAL_FEE_LITOSHIS,
+                    faucetPayEmail: email,
+                    timestamp: admin.database.ServerValue.TIMESTAMP,
+                    status: 'error_balance_deduction',
+                    faucetPayTxId: faucetPayData.payout_id || 'N/A',
+                    errorMessage: 'Deducción de balance falló en Firebase después de pago OK en FaucetPay.'
+                });
+                // También registra en activities para depuración, aunque es un error
+                await activitiesRef.push({
+                    type: 'Retiro',
+                    amount: withdrawalAmountLitoshis,
+                    currency: FAUCETPAY_CURRENCY,
+                    status: 'Error Crítico',
+                    timestamp: admin.database.ServerValue.TIMESTAMP,
+                    message: `ERROR: Retiro de ${withdrawalAmountLTC.toFixed(8)} LTC procesado por FaucetPay, pero no se pudo deducir el balance.`,
+                    txId: faucetPayData.payout_id || 'N/A'
+                });
+
+                res.status(500).json({
+                    success: false,
+                    message: 'Error crítico: Pago realizado en FaucetPay, pero el balance no pudo ser actualizado. Contacta al soporte.'
+                });
             }
-            return; // Abortar si no hay datos
-        });
 
-        if (!referredUserTransactionResult.committed) {
-            console.error(`Transacción de referido abortada para ${userId}.`);
-            return res.status(500).json({ success: false, message: 'Error al aplicar la recompensa de referido (transacción fallida).' });
+        } else {
+            // **FAUCETPAY FALLÓ**: NO deduce el saldo. Solo registra la transacción fallida.
+            console.error(`Fallo de FaucetPay para ${userId}. NO se deduce balance. Mensaje FaucetPay: ${faucetPayData.message || 'Desconocido'}`);
+            db.ref(`transactions/${userId}`).push({
+                type: 'withdrawal_failed_faucetpay',
+                amount: withdrawalAmountLitoshis,
+                fee: WITHDRAWAL_FEE_LITOSHIS,
+                faucetPayEmail: email,
+                timestamp: admin.database.ServerValue.TIMESTAMP,
+                status: 'failed_external',
+                errorMessage: faucetPayData.message || 'Error desconocido de FaucetPay.',
+            });
+            console.log(`Transacción de retiro fallida registrada en 'transactions' para ${userId}.`);
+
+            // ****** REGISTRAR ACTIVIDAD FALLIDA EN NODO 'activities' ******
+            await activitiesRef.push({
+                type: 'Retiro',
+                amount: withdrawalAmountLitoshis,
+                currency: FAUCETPAY_CURRENCY,
+                status: 'Fallido',
+                timestamp: admin.database.ServerValue.TIMESTAMP,
+                message: `Retiro de ${withdrawalAmountLTC.toFixed(8)} LTC fallido. Mensaje: ${faucetPayData.message || 'Error desconocido de FaucetPay.'}`,
+                txId: 'N/A' // No hay ID de transacción de FaucetPay si falló el envío
+            });
+            console.log(`Actividad de retiro fallida registrada en 'activities' para ${userId}.`);
+            // ***************************************************************
+
+            res.status(400).json({
+                success: false,
+                message: faucetPayData.message || 'Error al procesar el retiro con FaucetPay. Tus fondos no fueron afectados.'
+            });
         }
+    } catch (faucetPayNetworkError) {
+        // Error de red/conexión al comunicarse con FaucetPay.
+        console.error(`Error de red/conexión al comunicarse con FaucetPay para ${userId}:`, faucetPayNetworkError);
 
-        // Actualizar balance del referente y contador (no necesitamos transacción aquí si solo es un incremento simple)
-        const referrerRef = db.ref(`users/${referrerUid}`);
-        await referrerRef.update({
-            balance: (referrerData.balance || 0) + REFERRER_REWARD_AMOUNT_LITOSHIS,
-            referralsCount: admin.database.ServerValue.increment(1)
+        // ****** REGISTRAR ACTIVIDAD DE ERROR DE RED EN NODO 'activities' ******
+        await activitiesRef.push({
+            type: 'Retiro',
+            amount: withdrawalAmountLitoshis,
+            currency: FAUCETPAY_CURRENCY,
+            status: 'Error de Conexión',
+            timestamp: admin.database.ServerValue.TIMESTAMP,
+            message: `Retiro de ${withdrawalAmountLTC.toFixed(8)} LTC fallido por error de conexión.`,
+            txId: 'N/A'
         });
+        console.log(`Actividad de retiro (error de conexión) registrada en 'activities' para ${userId}.`);
+        // ************************************************************************
 
-        console.log(`[REFERRAL_ENDPOINT] Recompensa aplicada para ${userId} (referido) y ${referrerUid} (referente).`);
-
-        return res.status(200).json({
-            success: true,
-            message: '¡Código de referido aplicado con éxito! Has ganado Litoshis.',
-            referredByCode: referralCode,
-            referralRewardAmount: REFERRED_USER_REWARD_AMOUNT_LITOSHIS
-        });
-
-    } catch (error) {
-        console.error("Error al aplicar código de referido:", error);
-        return res.status(500).json({ success: false, message: 'Error interno del servidor al aplicar el código de referido.' });
+        res.status(500).json({ success: false, message: 'Error de conexión con el servicio de retiro. Intenta de nuevo más tarde.' });
     }
 });
 
