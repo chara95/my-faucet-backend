@@ -5,31 +5,33 @@
 import 'dotenv/config';
 
 import express from 'express';
-// import bodyParser from 'body-parser'; // express.json() es suficiente para JSON bodies, bodyParser ya no es estrictamente necesario.
-import fetch from 'node-fetch'; // Asegúrate de que node-fetch ^2.6.1 sea compatible con ES modules si hay problemas, o actualiza a ^3.x si quieres usar la versión más reciente con fetch global.
+import fetch from 'node-fetch';
 import cors from 'cors';
-import admin from 'firebase-admin'; // <<-- NUEVO: Importación de Firebase Admin SDK
+import admin from 'firebase-admin';
 
 const app = express();
-const PORT = process.env.PORT || 3001; // Usando el puerto 3001, como ya lo tienes configurado
+const PORT = process.env.PORT || 3001;
 const FAUCETPAY_API_KEY = process.env.FAUCETPAY_API_KEY;
-const FAUCETPAY_CURRENCY = 'LTC'; // La moneda que vas a usar para validación/pagos
+const FAUCETPAY_CURRENCY = 'LTC';
 
 // Asegúrate de que la API Key esté configurada
 if (!FAUCETPAY_API_KEY || FAUCETPAY_API_KEY === 'TU_API_KEY_REAL_DE_FAUCETPAY_AQUI') {
     console.error('ERROR: FAUCETPAY_API_KEY no está configurada en el archivo .env o es el valor por defecto.');
     console.error('Por favor, reemplaza "TU_API_KEY_REAL_DE_FAUCETPAY_AQUI" en .env con tu clave real.');
-    process.exit(1); // Sale de la aplicación si la clave no está configurada
+    process.exit(1);
 }
-
-
 
 // --- CONFIGURACIÓN DE FIREBASE ADMIN SDK ---
 
+// Construye el objeto serviceAccount a partir de variables de entorno individuales
+// La clave privada necesita el reemplazo de '\n' si viene escapada en la variable de entorno
 const serviceAccount = {
     "type": process.env.FIREBASE_TYPE,
     "project_id": process.env.FIREBASE_PROJECT_ID,
     "private_key_id": process.env.FIREBASE_PRIVATE_KEY_ID,
+    // Asegúrate de que la clave privada se maneje correctamente.
+    // Si la variable de entorno ya contiene los saltos de línea literales, el replace no es necesario.
+    // Si contiene "\\n" escapados, el replace los convierte a "\n" reales.
     "private_key": process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
     "client_email": process.env.FIREBASE_CLIENT_EMAIL,
     "client_id": process.env.FIREBASE_CLIENT_ID,
@@ -40,48 +42,50 @@ const serviceAccount = {
     "universe_domain": process.env.FIREBASE_UNIVERSE_DOMAIN
 };
 
-// Verifica si las credenciales de Firebase están disponibles
-if (!serviceAccount.project_id || !serviceAccount.private_key) {
-    console.error('ERROR: Las variables de entorno de Firebase Admin SDK no están configuradas correctamente.');
-    console.error('Por favor, asegúrate de que FIREBASE_PROJECT_ID y FIREBASE_PRIVATE_KEY (entre otras) estén definidas en tus variables de entorno de Render.');
-    // No salimos si no están, para permitir que el servidor Express arranque, pero las operaciones de Firebase fallarán.
+// Verifica si las credenciales de Firebase están disponibles y son válidas antes de inicializar
+if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
+    console.error('ERROR: Algunas variables de entorno de Firebase Admin SDK no están configuradas correctamente.');
+    console.error('Por favor, asegúrate de que FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, FIREBASE_CLIENT_EMAIL, etc., estén definidas en tus variables de entorno de Render.');
+    // Es CRÍTICO que estas credenciales estén bien para que Firebase Admin SDK funcione.
+    // Si no están, las operaciones de Firebase fallarán. Podrías considerar un process.exit(1) aquí.
+    process.exit(1); // Terminamos el proceso si las credenciales básicas no están.
 }
 
 try {
     admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
-        databaseURL: process.env.FIREBASE_DATABASE_URL // <<-- Usa una variable de entorno para la URL
+        databaseURL: process.env.FIREBASE_DATABASE_URL // Usa una variable de entorno para la URL de la base de datos
     });
     console.log("Firebase Admin SDK inicializado correctamente.");
 } catch (error) {
     console.error("ERROR: No se pudo inicializar Firebase Admin SDK:", error.message);
-    // Considera si quieres que el proceso termine aquí o solo loggear el error.
+    process.exit(1); // Si el SDK no se inicializa, el backend no puede funcionar correctamente
 }
 
 // Obtiene una referencia a la Realtime Database
 const db = admin.database();
-console.log("Firebase Admin SDK inicializado correctamente. Conectado a DB:", admin.app().options.databaseURL);
-// --- FIN NUEVO: CONFIGURACIÓN DE FIREBASE ADMIN SDK ---
+console.log("Firebase Admin SDK: Conectado a DB:", admin.app().options.databaseURL);
+// --- FIN CONFIGURACIÓN DE FIREBASE ADMIN SDK ---
 
 // === CONSTANTES EN EL BACKEND (MANTENER SINCRONIZADAS) ===
-// Asegúrate de que estas constantes estén al principio de tu server.js
 const LTC_TO_LITOSHIS_FACTOR = 100_000_000;
-// Comision de retiro
 const WITHDRAWAL_FEE_LITOSHIS = 1000; // 0.00001 LTC
-const MIN_WITHDRAWAL_LITOSHIS_BACKEND = 1000; // 0.00001 LTC (mínimo de retiro en Litoshis)
+const MIN_WITHDRAWAL_LITOSHIS_BACKEND = 1000; // 0.00001 LTC
 const REFERRED_USER_REWARD_AMOUNT_LITOSHIS = 200; // 0.00002 LTC en Litoshis
-const REFERRER_REWARD_AMOUNT_LITOSHIS = 200;    // 0.00002 LTC en Litoshis
-
-
-
-
-
+const REFERRER_REWARD_AMOUNT_LITOSHIS = 200; // 0.00002 LTC en Litoshis
 
 // Configuración de middlewares
 app.use(express.json()); // Middleware para parsear bodies de solicitud JSON
-// app.use(cors());
 
+// Configuración de CORS
+app.use(cors({
+    origin: ['http://127.0.0.1:3000', 'http://localhost:3000', 'https://my-faucet-backend-3.onrender.com'],
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+}));
 
+// Middleware de autenticación
 const authenticate = async (req, res, next) => {
     const idToken = req.headers.authorization ? req.headers.authorization.split('Bearer ')[1] : null;
 
@@ -92,33 +96,17 @@ const authenticate = async (req, res, next) => {
     try {
         const decodedToken = await admin.auth().verifyIdToken(idToken);
         req.user = decodedToken; // Agrega los datos del usuario autenticado a la solicitud
-        next(); // Continúa con la siguiente función de middleware/ruta
+        next();
     } catch (error) {
         console.error('Error al verificar el token de autenticación:', error);
         return res.status(403).json({ success: false, message: 'No autorizado: Token inválido o expirado.' });
     }
 };
 
-app.use(cors({
-    origin: ['http://127.0.0.1:3000', 'http://localhost:3000', 'https://my-faucet-backend-3.onrender.com'], 
-    methods: ['GET', 'POST', 'OPTIONS'], // <--- ¡Asegúrate de que 'OPTIONS' esté aquí!
-    allowedHeaders: ['Content-Type', 'Authorization'], 
-    credentials: true 
-}));
-
-
-
-
-
-
-
-
 // --- ENDPOINT PARA VALIDAR EL CORREO ELECTRÓNICO CON FAUCETPAY ---
-// Aplica el middleware 'authenticate' a esta ruta
 app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
     const { email } = req.body;
-    // req.user ahora contiene el UID del usuario, puedes usarlo para auditoría si es necesario
-    const userId = req.user.uid; 
+    const userId = req.user.uid;
     console.log(`Validando FaucetPay email para ${userId}: ${email}`);
 
     if (!email) {
@@ -143,11 +131,9 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
 
         const faucetPayData = await faucetPayResponse.json();
 
-        console.log("Respuesta de FaucetPay:", faucetPayData);
+        console.log("Respuesta de FaucetPay (validación):", faucetPayData);
 
         if (faucetPayData.status === 200 && faucetPayData.message === "OK") {
-            // Si FaucetPay valida el correo, puedes opcionalmente guardarlo aquí en tu DB
-            // db.ref(`users/${userId}`).update({ faucetPayEmail: email });
             res.json({
                 success: true,
                 message: 'Correo electrónico validado con éxito en FaucetPay.',
@@ -158,8 +144,7 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
                 success: false,
                 message: faucetPayData.message || 'El correo electrónico no pertenece a ningún usuario de FaucetPay.'
             });
-        }
-        else {
+        } else {
             console.error('Error de FaucetPay al validar correo (otro estado o mensaje):', faucetPayData);
             res.status(500).json({
                 success: false,
@@ -174,17 +159,11 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
 });
 
 // --- ENDPOINT PARA PROCESAR EL RETIRO ---
-// Aplica el middleware 'authenticate' a esta ruta
 app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => {
-    // El userId ahora viene del token autenticado, no del body (más seguro)
- console.log('¡Solicitud de retiro recibida!'); // <-- AÑADE ESTA LÍNEA
-    
+    console.log('¡Solicitud de retiro recibida!');
 
-
-   
     const userId = req.user.uid;
-    const { email, amount } = req.body; // 'email' debería ser el email de FaucetPay que el usuario tiene guardado en tu DB
-                                        // 'amount' es el monto en LTC (decimal) desde el frontend
+    const { email, amount } = req.body;
 
     if (!email || !amount) {
         return res.status(400).json({ success: false, message: 'Email/dirección y monto son requeridos para el retiro.' });
@@ -194,64 +173,69 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     if (isNaN(withdrawalAmountLTC) || withdrawalAmountLTC <= 0) {
         return res.status(400).json({ success: false, message: 'Monto de retiro inválido.' });
     }
-    const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * LTC_TO_LITOSHIS_FACTOR); // Convertir LTC a Litoshis
+    const withdrawalAmountLitoshis = Math.round(withdrawalAmountLTC * LTC_TO_LITOSHIS_FACTOR);
 
-   
-
-    // Validar monto mínimo en el backend también
     if (withdrawalAmountLitoshis < MIN_WITHDRAWAL_LITOSHIS_BACKEND) {
-        return res.status(400).json({ success: false, message: `La cantidad mínima de retiro es ${ (MIN_WITHDRAWAL_LITOSHIS_BACKEND / LTC_TO_LITOSHIS_FACTOR).toFixed(8) } LTC.` });
+        return res.status(400).json({ success: false, message: `La cantidad mínima de retiro es ${(MIN_WITHDRAWAL_LITOSHIS_BACKEND / LTC_TO_LITOSHIS_FACTOR).toFixed(8)} LTC.` });
     }
-
 
     const totalCostLitoshis = withdrawalAmountLitoshis + WITHDRAWAL_FEE_LITOSHIS;
 
     const userRef = db.ref(`users/${userId}`);
-    
 
-
+    // --- PRUEBA DE LECTURA DIRECTA ANTES DE LA TRANSACCIÓN ---
+    try {
+        const snapshot = await userRef.once('value');
+        if (snapshot.exists()) {
+            const userData = snapshot.val();
+            console.log("TEST_LECTURA_DIRECTA: Datos del usuario encontrados:", userData);
+            if (userData.balance === undefined || userData.faucetPayEmail === undefined) {
+                console.warn("TEST_LECTURA_DIRECTA: El usuario existe pero le faltan campos clave (balance/faucetPayEmail).");
+            }
+        } else {
+            console.error("TEST_LECTURA_DIRECTA: El snapshot no existe. NO SE ENCONTRARON DATOS DEL USUARIO POR LECTURA DIRECTA.");
+        }
+    } catch (readError) {
+        console.error("TEST_LECTURA_DIRECTA: Error al intentar leer directamente los datos del usuario:", readError);
+    }
+    // --- FIN PRUEBA DE LECTURA DIRECTA ---
 
     // Usar una transacción para asegurar la integridad del balance
-console.log("La transacción intenta acceder a:", userRef.toString());
-const transactionResult = await userRef.transaction(currentData => {
-    console.log("Transacción - currentData:", currentData); // Este log ahora debería ser correcto si el problema de 'ReferenceError' se corrige.
+    console.log("La transacción intenta acceder a:", userRef.toString());
+    const transactionResult = await userRef.transaction(currentData => {
+        console.log("Transacción - currentData dentro del callback:", currentData); // Log dentro del callback de la transacción
 
-    if (currentData) {
-        const currentBalanceLitoshis = currentData.balance || 0;
-        const storedFaucetPayEmail = currentData.faucetPayEmail;
+        if (currentData) {
+            const currentBalanceLitoshis = currentData.balance || 0;
+            const storedFaucetPayEmail = currentData.faucetPayEmail;
 
-        // ¡ATENCIÓN! Faltaba el 'if' para la comparación de emails. Lo añado aquí.
-        // También corregí la interpolación de strings (`${variable}`)
-        if (storedFaucetPayEmail !== email) { // 'email' debe venir del scope exterior (req.body.email)
-            console.warn(`Discrepancia de email FaucetPay para ${userId}: Cliente envió '${email}', DB tiene '${storedFaucetPayEmail}'. ABORTANDO.`);
-            return; // Aborta la transacción si los emails no coinciden
-        }
+            // Debug logs dentro de la transacción
+            console.log("Transacción - currentBalanceLitoshis:", currentBalanceLitoshis);
+            console.log("Transacción - storedFaucetPayEmail:", storedFaucetPayEmail);
+            console.log("Transacción - email de solicitud:", email);
+            console.log("Transacción - totalCostLitoshis:", totalCostLitoshis);
 
-        // Faltaban los logs de balance y email almacenado/solicitado. Los añado aquí para una depuración más completa.
-        console.log("Transacción - currentBalanceLitoshis:", currentBalanceLitoshis);
-        console.log("Transacción - storedFaucetPayEmail:", storedFaucetPayEmail);
-        console.log("Transacción - email de solicitud:", email); // 'email' viene del scope exterior
-        console.log("Transacción - totalCostLitoshis:", totalCostLitoshis); // 'totalCostLitoshis' viene del scope exterior
+            if (storedFaucetPayEmail !== email) {
+                console.warn(`Discrepancia de email FaucetPay para ${userId}: Cliente envió '${email}', DB tiene '${storedFaucetPayEmail}'. ABORTANDO.`);
+                return; // Aborta la transacción si los emails no coinciden
+            }
 
-
-        if (currentBalanceLitoshis >= totalCostLitoshis) { // 'totalCostLitoshis' debe venir del scope exterior
-            console.log(`Balance suficiente. Actualizando balance de ${currentBalanceLitoshis} a ${currentBalanceLitoshis - totalCostLitoshis}`);
-            currentData.balance = currentBalanceLitoshis - totalCostLitoshis;
-            return currentData; // Retorna el nuevo estado para que Firebase lo actualice
+            if (currentBalanceLitoshis >= totalCostLitoshis) {
+                console.log(`Balance suficiente. Actualizando balance de ${currentBalanceLitoshis} a ${currentBalanceLitoshis - totalCostLitoshis}`);
+                currentData.balance = currentBalanceLitoshis - totalCostLitoshis;
+                return currentData; // Retorna el nuevo estado para que Firebase lo actualice
+            } else {
+                console.warn(`Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
+            }
         } else {
-            console.warn(`Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
-            // Si el balance es insuficiente, la transacción se aborta implícitamente al no retornar un valor.
-            // No necesitas un 'return;' explícito aquí, ya que el 'return;' final del callback lo manejará.
+            console.error(`ERROR en transacción: No se encontraron datos para el usuario ${userId} en la base de datos. ABORTANDO.`);
         }
-    } else {
-        console.error(`ERROR en transacción: No se encontraron datos para el usuario ${userId}. ABORTANDO.`);
-    }
-    return; // Aborta la transacción si no hay datos o si alguna de las condiciones previas hizo que se saltara el 'return currentData'
-});
+        return; // Aborta la transacción si no hay datos o si alguna de las condiciones previas hizo que se saltara el 'return currentData'
+    });
 
-// ¡Y no olvides el log del resultado final de la transacción fuera de este fragmento!
-// console.log("Resultado COMPLETO de la transacción de Firebase:", transactionResult);
-    if (transactionResult.committed && transactionResult.snapshot.val()) {
+    console.log("Resultado COMPLETO de la transacción de Firebase:", transactionResult);
+
+    if (transactionResult.committed && transactionResult.snapshot && transactionResult.snapshot.val()) {
         const newBalanceLitoshis = transactionResult.snapshot.val().balance;
 
         // Balance deducido, ahora procede con FaucetPay
@@ -300,10 +284,9 @@ const transactionResult = await userRef.transaction(currentData => {
                     console.log(`Balance de ${userId} revertido a ${currentData.balance} Litoshis.`);
                     return currentData;
                 }
-                return; // Abortar si no hay datos (no debería pasar)
+                return; // Abortar si no hay datos (no debería pasar si transactionResult.committed fue true antes)
             });
 
-            // Opcional: registrar el intento fallido de retiro
             db.ref(`transactions/${userId}`).push({
                 type: 'withdrawal_failed',
                 amount: withdrawalAmountLitoshis,
@@ -321,7 +304,8 @@ const transactionResult = await userRef.transaction(currentData => {
         }
     } else if (transactionResult.aborted) {
         // La transacción fue abortada (ej. balance insuficiente, email no coincide)
-        if (transactionResult.snapshot && transactionResult.snapshot.val().faucetPayEmail !== email) {
+        // Puedes refinar los mensajes de error aquí basándote en la lógica dentro de tu transacción
+        if (transactionResult.snapshot && transactionResult.snapshot.val() && transactionResult.snapshot.val().faucetPayEmail !== email) {
             return res.status(400).json({ success: false, message: 'El correo de FaucetPay en tu cuenta no coincide con el de la solicitud.' });
         }
         return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro o error interno de la base de datos.' });
@@ -329,12 +313,10 @@ const transactionResult = await userRef.transaction(currentData => {
         // Esto puede ocurrir si el usuario no existe, o algún otro problema con la transacción
         return res.status(500).json({ success: false, message: 'No se pudo procesar el retiro debido a un problema de la base de datos.' });
     }
-
 });
 
 // --- ENDPOINT PARA APLICAR CÓDIGO DE REFERIDO (CON AUTENTICACIÓN) ---
 app.post('/api/apply-referral-code', authenticate, async (req, res) => {
-    // El userId ahora viene del token autenticado, no del body
     const userId = req.user.uid;
     const { referralCode } = req.body;
 
@@ -375,12 +357,10 @@ app.post('/api/apply-referral-code', authenticate, async (req, res) => {
         }
 
         // --- Aplicar recompensas y actualizar base de datos con transacción ---
-        // Usamos una transacción para el usuario referido para asegurar la atomicidad
         const referredUserTransactionResult = await referredUserRef.transaction(currentReferredUserData => {
             if (currentReferredUserData) {
                 if (currentReferredUserData.referredByCode || currentReferredUserData.referralClaimed) {
-                    // Si ya se aplicó en el interín, abortar.
-                    return;
+                    return; // Si ya se aplicó en el interín, abortar.
                 }
                 currentReferredUserData.balance = (currentReferredUserData.balance || 0) + REFERRED_USER_REWARD_AMOUNT_LITOSHIS;
                 currentReferredUserData.referredByCode = referralCode;
@@ -417,8 +397,6 @@ app.post('/api/apply-referral-code', authenticate, async (req, res) => {
         return res.status(500).json({ success: false, message: 'Error interno del servidor al aplicar el código de referido.' });
     }
 });
-
-
 
 // Inicia el servidor Express
 app.listen(PORT, () => {
