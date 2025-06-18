@@ -322,6 +322,7 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
 // const db = admin.database();
 
 // --- ENDPOINT PARA PROCESAR EL RETIRO (SEGURO Y CONDICIONAL) ---
+// --- ENDPOINT PARA PROCESAR EL RETIRO (SEGURO, CONDICIONAL, Guarda en transactions Y activities) ---
 app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => {
     console.log('¡Solicitud de retiro recibida!');
 
@@ -345,13 +346,14 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     const totalCostLitoshis = withdrawalAmountLitoshis + WITHDRAWAL_FEE_LITOSHIS;
 
     const userRef = db.ref(`users/${userId}`);
-    const activitiesRef = db.ref(`activities/${userId}`); // Referencia al nodo de actividades del usuario
+    const userActivitiesRef = db.ref(`users/${userId}/activities`); // Sub-nodo de actividades
+    const transactionsRef = db.ref(`transactions/${userId}`); // Nodo de transacciones de nivel superior
 
     // --- 1. Leer datos del usuario (saldo y email de FaucetPay) ---
     let currentBalanceLitoshis;
     let storedFaucetPayEmail;
     try {
-        const snapshot = await userRef.once('value'); // Lectura directa que sabemos que funciona
+        const snapshot = await userRef.once('value');
         if (snapshot.exists()) {
             const userData = snapshot.val();
             currentBalanceLitoshis = userData.balance || 0;
@@ -400,20 +402,20 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
 
         // --- 4. Procesar respuesta de FaucetPay y Actualizar Firebase Condicionalmente ---
         if (faucetPayData.status === 200 && faucetPayData.message === "OK") {
-            // **FAUCETPAY OK**: Deduce el saldo y registra la transacción exitosa
-            console.log(`Pago FaucetPay exitoso. Deduciendo balance de ${userId} y registrando transacción.`);
+            // **FAUCETPAY OK**: Deduce el saldo y registra ambas transacciones
+            console.log(`Pago FaucetPay exitoso. Deduciendo balance de ${userId} y registrando transacciones.`);
 
             const newBalanceAfterWithdrawal = currentBalanceLitoshis - totalCostLitoshis;
 
             try {
-                // Actualiza el campo 'balance' directamente (sin transaction)
+                // Actualiza el campo 'balance' directamente
                 await userRef.update({
                     balance: newBalanceAfterWithdrawal
                 });
                 console.log(`Balance de ${userId} actualizado a ${newBalanceAfterWithdrawal} Litoshis.`);
 
-                // Registrar la transacción en nodo 'transactions'
-                db.ref(`transactions/${userId}`).push({
+                // ****** REGISTRAR EN NODO 'transactions' (nivel superior) ******
+                await transactionsRef.push({
                     type: 'withdrawal',
                     amount: withdrawalAmountLitoshis,
                     fee: WITHDRAWAL_FEE_LITOSHIS,
@@ -422,20 +424,22 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
                     status: 'completed',
                     faucetPayTxId: faucetPayData.payout_id || 'N/A',
                 });
-                console.log(`Transacción de retiro exitosa registrada en 'transactions' para ${userId}.`);
+                console.log(`Transacción de retiro exitosa registrada en 'transactions/${userId}'.`);
+                // ***************************************************************
 
-                // ****** REGISTRAR ACTIVIDAD EN NODO 'activities' ******
-                await activitiesRef.push({
+                // ****** REGISTRAR ACTIVIDAD EN SUB-NODO 'activities' dentro del usuario ******
+                await userActivitiesRef.push({
                     type: 'Retiro',
                     amount: withdrawalAmountLitoshis,
+                    fee: WITHDRAWAL_FEE_LITOSHIS,
                     currency: FAUCETPAY_CURRENCY,
                     status: 'Completado',
                     timestamp: admin.database.ServerValue.TIMESTAMP,
                     message: `Retiro de ${withdrawalAmountLTC.toFixed(8)} LTC a ${email} completado.`,
                     txId: faucetPayData.payout_id || 'N/A' // ID de la transacción de FaucetPay
                 });
-                console.log(`Actividad de retiro exitosa registrada en 'activities' para ${userId}.`);
-                // ******************************************************
+                console.log(`Actividad de retiro exitosa registrada en 'users/${userId}/activities'.`);
+                // ********************************************************************************
 
                 res.json({
                     success: true,
@@ -446,9 +450,9 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
 
             } catch (firebaseUpdateError) {
                 // FaucetPay fue OK, pero la deducción de balance en Firebase falló.
-                // ESTO ES CRÍTICO: Registra el incidente y alerta.
                 console.error(`Advertencia CRÍTICA: FaucetPay exitoso, pero la deducción de balance en Firebase falló para ${userId}:`, firebaseUpdateError);
-                db.ref(`transactions/${userId}`).push({
+                // Registrar el incidente en ambos nodos para depuración
+                await transactionsRef.push({
                     type: 'withdrawal_firebase_deduction_failed_after_faucetpay_ok',
                     amount: withdrawalAmountLitoshis,
                     fee: WITHDRAWAL_FEE_LITOSHIS,
@@ -458,10 +462,10 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
                     faucetPayTxId: faucetPayData.payout_id || 'N/A',
                     errorMessage: 'Deducción de balance falló en Firebase después de pago OK en FaucetPay.'
                 });
-                // También registra en activities para depuración, aunque es un error
-                await activitiesRef.push({
+                await userActivitiesRef.push({
                     type: 'Retiro',
                     amount: withdrawalAmountLitoshis,
+                    fee: WITHDRAWAL_FEE_LITOSHIS,
                     currency: FAUCETPAY_CURRENCY,
                     status: 'Error Crítico',
                     timestamp: admin.database.ServerValue.TIMESTAMP,
@@ -476,9 +480,10 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
             }
 
         } else {
-            // **FAUCETPAY FALLÓ**: NO deduce el saldo. Solo registra la transacción fallida.
+            // **FAUCETPAY FALLÓ**: NO deduce el saldo. Registra la transacción fallida en ambos.
             console.error(`Fallo de FaucetPay para ${userId}. NO se deduce balance. Mensaje FaucetPay: ${faucetPayData.message || 'Desconocido'}`);
-            db.ref(`transactions/${userId}`).push({
+            // ****** REGISTRAR EN NODO 'transactions' (nivel superior) ******
+            await transactionsRef.push({
                 type: 'withdrawal_failed_faucetpay',
                 amount: withdrawalAmountLitoshis,
                 fee: WITHDRAWAL_FEE_LITOSHIS,
@@ -487,20 +492,22 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
                 status: 'failed_external',
                 errorMessage: faucetPayData.message || 'Error desconocido de FaucetPay.',
             });
-            console.log(`Transacción de retiro fallida registrada en 'transactions' para ${userId}.`);
+            console.log(`Transacción de retiro fallida registrada en 'transactions/${userId}'.`);
+            // ***************************************************************
 
-            // ****** REGISTRAR ACTIVIDAD FALLIDA EN NODO 'activities' ******
-            await activitiesRef.push({
+            // ****** REGISTRAR ACTIVIDAD FALLIDA EN SUB-NODO 'activities' dentro del usuario ******
+            await userActivitiesRef.push({
                 type: 'Retiro',
                 amount: withdrawalAmountLitoshis,
+                fee: WITHDRAWAL_FEE_LITOSHIS,
                 currency: FAUCETPAY_CURRENCY,
                 status: 'Fallido',
                 timestamp: admin.database.ServerValue.TIMESTAMP,
                 message: `Retiro de ${withdrawalAmountLTC.toFixed(8)} LTC fallido. Mensaje: ${faucetPayData.message || 'Error desconocido de FaucetPay.'}`,
                 txId: 'N/A' // No hay ID de transacción de FaucetPay si falló el envío
             });
-            console.log(`Actividad de retiro fallida registrada en 'activities' para ${userId}.`);
-            // ***************************************************************
+            console.log(`Actividad de retiro fallida registrada en 'users/${userId}/activities'.`);
+            // **************************************************************************************
 
             res.status(400).json({
                 success: false,
@@ -511,18 +518,27 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
         // Error de red/conexión al comunicarse con FaucetPay.
         console.error(`Error de red/conexión al comunicarse con FaucetPay para ${userId}:`, faucetPayNetworkError);
 
-        // ****** REGISTRAR ACTIVIDAD DE ERROR DE RED EN NODO 'activities' ******
-        await activitiesRef.push({
+        // Registrar el error de red en ambos nodos
+        await transactionsRef.push({
+            type: 'withdrawal_network_error',
+            amount: withdrawalAmountLitoshis,
+            fee: WITHDRAWAL_FEE_LITOSHIS,
+            faucetPayEmail: email,
+            timestamp: admin.database.ServerValue.TIMESTAMP,
+            status: 'failed_network',
+            errorMessage: faucetPayNetworkError.message || 'Error de conexión con FaucetPay.'
+        });
+        await userActivitiesRef.push({
             type: 'Retiro',
             amount: withdrawalAmountLitoshis,
+            fee: WITHDRAWAL_FEE_LITOSHIS,
             currency: FAUCETPAY_CURRENCY,
             status: 'Error de Conexión',
             timestamp: admin.database.ServerValue.TIMESTAMP,
             message: `Retiro de ${withdrawalAmountLTC.toFixed(8)} LTC fallido por error de conexión.`,
             txId: 'N/A'
         });
-        console.log(`Actividad de retiro (error de conexión) registrada en 'activities' para ${userId}.`);
-        // ************************************************************************
+        console.log(`Actividad de retiro (error de conexión) registrada en 'transactions' y 'users/${userId}/activities'.`);
 
         res.status(500).json({ success: false, message: 'Error de conexión con el servicio de retiro. Intenta de nuevo más tarde.' });
     }
