@@ -99,11 +99,13 @@ const authenticate = async (req, res, next) => {
 };
 
 app.use(cors({
-    origin: ['http://127.0.0.1:3000', 'http://localhost:3000', 'https://tu-dominio-frontend-en-render.onrender.com'], 
+    origin: ['http://127.0.0.1:3000', 'http://localhost:3000', 'https://my-faucet-backend-3.onrender.com'], 
     methods: ['GET', 'POST', 'OPTIONS'], // <--- ¡Asegúrate de que 'OPTIONS' esté aquí!
     allowedHeaders: ['Content-Type', 'Authorization'], 
     credentials: true 
 }));
+
+
 
 
 
@@ -174,13 +176,13 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
 // Aplica el middleware 'authenticate' a esta ruta
 app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => {
     // El userId ahora viene del token autenticado, no del body (más seguro)
-
-    console.log('¡Solicitud de retiro recibida!'); // <-- AÑADE ESTA LÍNEA
+ console.log('¡Solicitud de retiro recibida!'); // <-- AÑADE ESTA LÍNEA
     console.log('Body de la solicitud:', req.body); // <-- Y ESTA PARA VER LOS DATOS
     console.log('userID de la solicitud:', req.user.uid);
     console.log('MINIMO DE RETIRO:', MIN_WITHDRAWAL_LITOSHIS_BACKEND / LTC_TO_LITOSHIS_FACTOR, 'LTC'); // <-- Y ESTA PARA VER EL MÍNIMO DE RETIRO
 
 
+   
     const userId = req.user.uid;
     const { email, amount } = req.body; // 'email' debería ser el email de FaucetPay que el usuario tiene guardado en tu DB
                                         // 'amount' es el monto en LTC (decimal) desde el frontend
@@ -208,28 +210,33 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     const userRef = db.ref(`users/${userId}`);
 
     // Usar una transacción para asegurar la integridad del balance
-    const transactionResult = await userRef.transaction(currentData => {
-        if (currentData) {
-            const currentBalanceLitoshis = currentData.balance || 0;
-            const storedFaucetPayEmail = currentData.faucetPayEmail;
+   const transactionResult = await userRef.transaction(currentData => {
+    console.log("Transacción - currentData:", currentData); // ¿Es null? (Ya sabemos que no, pero para confirmar)
+    if (currentData) {
+        const currentBalanceLitoshis = currentData.balance || 0;
+        const storedFaucetPayEmail = currentData.faucetPayEmail;
+        console.log("Transacción - currentBalanceLitoshis:", currentBalanceLitoshis);
+        console.log("Transacción - storedFaucetPayEmail:", storedFaucetPayEmail);
+        console.log("Transacción - email de solicitud:", email); // 'email' viene del scope exterior
+        console.log("Transacción - totalCostLitoshis:", totalCostLitoshis); // 'totalCostLitoshis' viene del scope exterior
 
-            // Vuelve a verificar que el email enviado por el cliente coincide con el guardado
-            if (storedFaucetPayEmail !== email) {
-                console.warn(`Discrepancia de email FaucetPay para ${userId}: Cliente envió '${email}', DB tiene '${storedFaucetPayEmail}'.`);
-                // Podrías devolver undefined para abortar la transacción o manejarlo como error
-                return; // Aborta la transacción
-            }
-
-            if (currentBalanceLitoshis >= totalCostLitoshis) {
-                currentData.balance = currentBalanceLitoshis - totalCostLitoshis;
-                return currentData; // Retorna el nuevo estado para que Firebase lo actualice
-            } else {
-                console.warn(`Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}`);
-                // Podrías devolver undefined o lanzar un error específico si transaction soporta eso directamente
-            }
+        if (storedFaucetPayEmail !== email) {
+            console.warn(`Discrepancia de email FaucetPay para <span class="math-inline">\{userId\}\: Cliente envió '</span>{email}', DB tiene '${storedFaucetPayEmail}'. ABORTANDO.`);
+            return;
         }
-        return; // Aborta la transacción si no hay datos o balance insuficiente
-    });
+
+        if (currentBalanceLitoshis >= totalCostLitoshis) {
+            console.log(`Balance suficiente. Actualizando balance de ${currentBalanceLitoshis} a ${currentBalanceLitoshis - totalCostLitoshis}`);
+            currentData.balance = currentBalanceLitoshis - totalCostLitoshis;
+            return currentData;
+        } else {
+            console.warn(`Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
+        }
+    } else {
+        console.error(`ERROR en transacción: No se encontraron datos para el usuario ${userId}. ABORTANDO.`);
+    }
+    return;
+});
 
     if (transactionResult.committed && transactionResult.snapshot.val()) {
         const newBalanceLitoshis = transactionResult.snapshot.val().balance;
