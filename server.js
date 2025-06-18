@@ -178,9 +178,7 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
 app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => {
     // El userId ahora viene del token autenticado, no del body (más seguro)
  console.log('¡Solicitud de retiro recibida!'); // <-- AÑADE ESTA LÍNEA
-    console.log('Body de la solicitud:', req.body); // <-- Y ESTA PARA VER LOS DATOS
-    console.log('userID de la solicitud:', req.user.uid);
-    console.log('MINIMO DE RETIRO:', MIN_WITHDRAWAL_LITOSHIS_BACKEND / LTC_TO_LITOSHIS_FACTOR, 'LTC'); // <-- Y ESTA PARA VER EL MÍNIMO DE RETIRO
+    
 
 
    
@@ -209,40 +207,50 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     const totalCostLitoshis = withdrawalAmountLitoshis + WITHDRAWAL_FEE_LITOSHIS;
 
     const userRef = db.ref(`users/${userId}`);
-    console.log("Transacción - currentData:", currentData);
+    
 
 
 
     // Usar una transacción para asegurar la integridad del balance
-    console.log("La transacción intenta acceder a:", userRef.toString());
-   const transactionResult = await userRef.transaction(currentData => {
-    console.log("Transacción - currentData:", currentData); // ¿Es null? (Ya sabemos que no, pero para confirmar)
+console.log("La transacción intenta acceder a:", userRef.toString());
+const transactionResult = await userRef.transaction(currentData => {
+    console.log("Transacción - currentData:", currentData); // Este log ahora debería ser correcto si el problema de 'ReferenceError' se corrige.
+
     if (currentData) {
         const currentBalanceLitoshis = currentData.balance || 0;
         const storedFaucetPayEmail = currentData.faucetPayEmail;
+
+        // ¡ATENCIÓN! Faltaba el 'if' para la comparación de emails. Lo añado aquí.
+        // También corregí la interpolación de strings (`${variable}`)
+        if (storedFaucetPayEmail !== email) { // 'email' debe venir del scope exterior (req.body.email)
+            console.warn(`Discrepancia de email FaucetPay para ${userId}: Cliente envió '${email}', DB tiene '${storedFaucetPayEmail}'. ABORTANDO.`);
+            return; // Aborta la transacción si los emails no coinciden
+        }
+
+        // Faltaban los logs de balance y email almacenado/solicitado. Los añado aquí para una depuración más completa.
         console.log("Transacción - currentBalanceLitoshis:", currentBalanceLitoshis);
         console.log("Transacción - storedFaucetPayEmail:", storedFaucetPayEmail);
         console.log("Transacción - email de solicitud:", email); // 'email' viene del scope exterior
         console.log("Transacción - totalCostLitoshis:", totalCostLitoshis); // 'totalCostLitoshis' viene del scope exterior
 
-        if (storedFaucetPayEmail !== email) {
-            console.warn(`Discrepancia de email FaucetPay para <span class="math-inline">\{userId\}\: Cliente envió '</span>{email}', DB tiene '${storedFaucetPayEmail}'. ABORTANDO.`);
-            return;
-        }
 
-        if (currentBalanceLitoshis >= totalCostLitoshis) {
+        if (currentBalanceLitoshis >= totalCostLitoshis) { // 'totalCostLitoshis' debe venir del scope exterior
             console.log(`Balance suficiente. Actualizando balance de ${currentBalanceLitoshis} a ${currentBalanceLitoshis - totalCostLitoshis}`);
             currentData.balance = currentBalanceLitoshis - totalCostLitoshis;
-            return currentData;
+            return currentData; // Retorna el nuevo estado para que Firebase lo actualice
         } else {
             console.warn(`Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
+            // Si el balance es insuficiente, la transacción se aborta implícitamente al no retornar un valor.
+            // No necesitas un 'return;' explícito aquí, ya que el 'return;' final del callback lo manejará.
         }
     } else {
         console.error(`ERROR en transacción: No se encontraron datos para el usuario ${userId}. ABORTANDO.`);
     }
-    return;
+    return; // Aborta la transacción si no hay datos o si alguna de las condiciones previas hizo que se saltara el 'return currentData'
 });
 
+// ¡Y no olvides el log del resultado final de la transacción fuera de este fragmento!
+// console.log("Resultado COMPLETO de la transacción de Firebase:", transactionResult);
     if (transactionResult.committed && transactionResult.snapshot.val()) {
         const newBalanceLitoshis = transactionResult.snapshot.val().balance;
 
