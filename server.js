@@ -108,12 +108,18 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
     console.log(`Validando FaucetPay email para ${userId}: ${email}`);
 
     if (!email) {
+        // Log activity for missing email
+        db.ref(`users/${userId}/activities`).push({
+            type: 'faucetpay_email_validation',
+            status: 'failed',
+            description: 'Intento de validación de FaucetPay: correo no proporcionado.',
+            timestamp: admin.database.ServerValue.TIMESTAMP
+        }).catch(error => console.error("Error logging activity (no email):", error));
         return res.status(400).json({ success: false, message: 'Email es requerido.' });
     }
 
     try {
         const FAUCETPAY_API_URL = 'https://faucetpay.io/api/v1/checkaddress';
-
         const formData = new URLSearchParams();
         formData.append('api_key', FAUCETPAY_API_KEY);
         formData.append('address', email);
@@ -132,17 +138,44 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
         console.log("Respuesta de FaucetPay (validación):", faucetPayData);
 
         if (faucetPayData.status === 200 && faucetPayData.message === "OK") {
+            // Log successful activity
+            db.ref(`users/${userId}/activities`).push({
+                type: 'faucetpay_email_validation',
+                status: 'success',
+                description: `Correo FaucetPay '${email}' validado con éxito.`,
+                timestamp: admin.database.ServerValue.TIMESTAMP
+            }).catch(error => console.error("Error logging activity (success):", error));
+
             res.json({
                 success: true,
                 message: 'Correo electrónico validado con éxito en FaucetPay.',
                 payout_user_hash: faucetPayData.payout_user_hash
             });
         } else if (faucetPayData.status === 456) {
+            // Log failed activity (email not found)
+            db.ref(`users/${userId}/activities`).push({
+                type: 'faucetpay_email_validation',
+                status: 'failed',
+                description: `Intento de validación de FaucetPay: Correo '${email}' no registrado en FaucetPay.`,
+                faucetPayMessage: faucetPayData.message || 'El correo electrónico no pertenece a ningún usuario de FaucetPay.',
+                timestamp: admin.database.ServerValue.TIMESTAMP
+            }).catch(error => console.error("Error logging activity (456):", error));
+
             res.status(400).json({
                 success: false,
                 message: faucetPayData.message || 'El correo electrónico no pertenece a ningún usuario de FaucetPay.'
             });
         } else {
+            // Log other FaucetPay errors
+            db.ref(`users/${userId}/activities`).push({
+                type: 'faucetpay_email_validation',
+                status: 'failed',
+                description: `Intento de validación de FaucetPay: Error desconocido.`,
+                faucetPayStatus: faucetPayData.status,
+                faucetPayMessage: faucetPayData.message || 'Error desconocido de FaucetPay.',
+                timestamp: admin.database.ServerValue.TIMESTAMP
+            }).catch(error => console.error("Error logging activity (other error):", error));
+
             console.error('Error de FaucetPay al validar correo (otro estado o mensaje):', faucetPayData);
             res.status(500).json({
                 success: false,
@@ -151,6 +184,15 @@ app.post('/api/validate-faucetpay-email', authenticate, async (req, res) => {
         }
 
     } catch (error) {
+        // Log network/internal server errors
+        db.ref(`users/${userId}/activities`).push({
+            type: 'faucetpay_email_validation',
+            status: 'failed',
+            description: `Intento de validación de FaucetPay: Error de red o servidor.`,
+            errorMessage: error.message,
+            timestamp: admin.database.ServerValue.TIMESTAMP
+        }).catch(error => console.error("Error logging activity (catch error):", error));
+
         console.error('Error interno del servidor al validar el correo:', error);
         res.status(500).json({ success: false, message: 'Error interno del servidor al validar el correo.' });
     }
