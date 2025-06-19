@@ -71,8 +71,6 @@ console.log("Firebase Admin SDK: Conectado a DB:", admin.app().options.databaseU
 const LTC_TO_LITOSHIS_FACTOR = 100_000_000;
 const WITHDRAWAL_FEE_LITOSHIS = 1000; // 0.00001 LTC
 const MIN_WITHDRAWAL_LITOSHIS_BACKEND = 1000; // 0.00001 LTC
-const REFERRED_USER_REWARD_AMOUNT_LITOSHIS = 200; // 0.00002 LTC en Litoshis
-const REFERRER_REWARD_AMOUNT_LITOSHIS = 200; // 0.00002 LTC en Litoshis
 
 // Configuración de middlewares
 app.use(express.json()); // Middleware para parsear bodies de solicitud JSON
@@ -212,7 +210,7 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     // Re-validación del saldo en el backend (muy importante, no confíes solo en el frontend)
     if (currentBalanceLitoshis < totalCostLitoshis) {
         console.warn(`Backend: Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
-        return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro en el backend.' });
+        return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro.' });
     }
 
     // --- 3. Enviar solicitud a FaucetPay ---
@@ -340,6 +338,93 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     }
 });
 
+// --- ENDPOINT PARA PROCESAR EL PROCESO DE REFERIDOS (REFERIDOR) ---
+app.post('/api/apply-referral-code', authenticate, async (req, res) => {
+    const userId = req.user.uid; // El UID del usuario que intenta aplicar el código (el referido)
+    const { referralCode } = req.body; // El código de referido que se está aplicando
+
+    if (!referralCode) {
+        return res.status(400).json({ success: false, message: 'Código de referido es requerido.' });
+    }
+
+    const REFERRAL_REWARD_REFEREE = 200; // Define tus constantes aquí o impórtalas
+    const REFERRAL_REWARD_REFERRER = 200; // Define tus constantes aquí o impórtalas
+
+    const userRef = db.ref(`users/${userId}`); // Perfil del usuario que aplica el código
+    let userData;
+
+    try {
+        const snapshot = await userRef.once('value');
+        userData = snapshot.val();
+        if (!userData) {
+            return res.status(404).json({ success: false, message: 'Usuario no encontrado.' });
+        }
+
+        // Validar si el usuario ya aplicó un código
+        if (userData.referredBy) {
+            return res.status(400).json({ success: false, message: 'Ya has aplicado un código de referido.' });
+        }
+
+        // Validar que no se pueda aplicar el propio código
+        if (userData.referralCode && userData.referralCode === referralCode) {
+            return res.status(400).json({ success: false, message: 'No puedes aplicar tu propio código de referido.' });
+        }
+
+        // Buscar al referidor por su referralCode
+        const referrersRef = db.ref('users');
+        const referrerQuery = await referrersRef.orderByChild('referralCode').equalTo(referralCode).once('value');
+        
+        let referrerUid = null;
+        let referrerData = null;
+
+        referrerQuery.forEach(childSnapshot => {
+            referrerUid = childSnapshot.key;
+            referrerData = childSnapshot.val();
+        });
+
+        if (!referrerUid) {
+            return res.status(404).json({ success: false, message: 'Código de referido no válido o no encontrado.' });
+        }
+
+        // --- INICIO DE TRANSACCIÓN DE FIREBASE para asegurar atomicidad ---
+        // Esto es crucial para operaciones de balance que afectan a múltiples usuarios.
+        const updates = {};
+
+        // 1. Recompensa al usuario que aplica el código (el referido)
+        updates[`users/${userId}/balance`] = userData.balance + REFERRAL_REWARD_REFEREE;
+        updates[`users/${userId}/referredBy`] = referralCode; // Guarda el código del referidor en el referido
+        
+        // 2. Recompensa al referidor
+        updates[`users/${referrerUid}/balance`] = referrerData.balance + REFERRAL_REWARD_REFERRER;
+        // Opcional: si tienes un contador de referidos, lo incrementas aquí en el referidor
+        // updates[`users/${referrerUid}/referredCount`] = (referrerData.referredCount || 0) + 1;
+
+        await db.ref().update(updates); // Ejecuta todas las actualizaciones atómicamente
+
+        // 3. Registrar actividades (también desde el backend, o puedes dejar las del referido en el frontend)
+        // Actividad para el referido (en su propio nodo)
+        await db.ref(`users/${userId}/activities`).push({
+            type: 'referral_applied',
+            amount: REFERRAL_REWARD_REFEREE,
+            description: `Recompensa por aplicar código de ${referralCode}`,
+            timestamp: admin.database.ServerValue.TIMESTAMP
+        });
+
+        // Actividad para el referidor (en su propio nodo)
+        await db.ref(`users/${referrerUid}/activities`).push({
+            type: 'referred_user',
+            amount: REFERRAL_REWARD_REFERRER,
+            description: `Recompensa por referir a ${userData.displayName || userData.email || userId.substring(0,6)}`, // Usa nombre del referido
+            timestamp: admin.database.ServerValue.TIMESTAMP
+        });
+
+        return res.json({ success: true, message: 'Código de referido aplicado con éxito. Recompensas otorgadas.' });
+
+    } catch (error) {
+        console.error('Error en el endpoint /api/apply-referral-code:', error);
+        return res.status(500).json({ success: false, message: 'Error interno del servidor al aplicar código.' });
+    }
+});
 
 
 // Inicia el servidor Express
