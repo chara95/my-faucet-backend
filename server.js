@@ -373,7 +373,7 @@ app.post('/api/apply-referral-code', authenticate, async (req, res) => {
         // Buscar al referidor por su referralCode
         const referrersRef = db.ref('users');
         const referrerQuery = await referrersRef.orderByChild('referralCode').equalTo(referralCode).once('value');
-        
+
         let referrerUid = null;
         let referrerData = null;
 
@@ -392,12 +392,12 @@ app.post('/api/apply-referral-code', authenticate, async (req, res) => {
 
         // 1. Recompensa al usuario que aplica el código (el referido)
         updates[`users/${userId}/balance`] = userData.balance + REFERRAL_REWARD_REFEREE;
-        updates[`users/${userId}/referredBy`] = referralCode; // Guarda el código del referidor en el referido
-        
-        // 2. Recompensa al referidor
         updates[`users/${referrerUid}/balance`] = referrerData.balance + REFERRAL_REWARD_REFERRER;
-        // Opcional: si tienes un contador de referidos, lo incrementas aquí en el referidor
-        // updates[`users/${referrerUid}/referredCount`] = (referrerData.referredCount || 0) + 1;
+        updates[`users/${userId}/referredBy`] = referralCode; // Guarda el código del referidor en el referido
+        updates[`users/${referrerUid}/referrals/${userId}`] = {
+            timestamp: admin.database.ServerValue.TIMESTAMP
+        };
+
 
         await db.ref().update(updates); // Ejecuta todas las actualizaciones atómicamente
 
@@ -414,11 +414,11 @@ app.post('/api/apply-referral-code', authenticate, async (req, res) => {
         await db.ref(`users/${referrerUid}/activities`).push({
             type: 'referred_user',
             amount: REFERRAL_REWARD_REFERRER,
-            description: `Recompensa por referir a ${userData.displayName || userData.email || userId.substring(0,6)}`, // Usa nombre del referido
+            description: `Recompensa por referir a ${userData.displayName || userData.email || userId.substring(0, 6)}`, // Usa nombre del referido
             timestamp: admin.database.ServerValue.TIMESTAMP
         });
 
-        return res.json({ success: true, message: 'Código de referido aplicado con éxito. Recompensas otorgadas.' });
+        return res.json({ success: true, message: 'Código de referido aplicado con éxito.' });
 
     } catch (error) {
         console.error('Error en el endpoint /api/apply-referral-code:', error);
