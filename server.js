@@ -77,7 +77,7 @@ app.use(express.json()); // Middleware para parsear bodies de solicitud JSON
 
 // Configuración de CORS
 app.use(cors({
-    origin: ['http://127.0.0.1:3000', 'http://localhost:3000', 'https://my-faucet-backend-3.onrender.com'],
+    origin: ['http://127.0.0.1:3000', 'http://localhost:3000', 'https://my-faucet-backend-3.onrender.com', 'https://win-coin.onrender.com'],
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true
