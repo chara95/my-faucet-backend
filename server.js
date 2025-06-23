@@ -252,7 +252,7 @@ app.post('/api/request-faucetpay-withdrawal', authenticate, async (req, res) => 
     // Re-validación del saldo en el backend (muy importante, no confíes solo en el frontend)
     if (currentBalanceLitoshis < totalCostLitoshis) {
         console.warn(`Backend: Balance insuficiente para ${userId}: ${currentBalanceLitoshis} < ${totalCostLitoshis}. ABORTANDO.`);
-        return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro.' });
+        return res.status(400).json({ success: false, message: 'Balance insuficiente para el retiro y comision.' });
     }
 
     // --- 3. Enviar solicitud a FaucetPay ---
