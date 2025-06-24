@@ -70,7 +70,7 @@ console.log("Firebase Admin SDK: Conectado a DB:", admin.app().options.databaseU
 // === CONSTANTES EN EL BACKEND (MANTENER SINCRONIZADAS) ===
 const LTC_TO_LITOSHIS_FACTOR = 100_000_000;
 const WITHDRAWAL_FEE_LITOSHIS = 1000; // 0.00001 LTC
-const MIN_WITHDRAWAL_LITOSHIS_BACKEND = 1000; // 0.00001 LTC
+const MIN_WITHDRAWAL_LITOSHIS_BACKEND = 10000; // 0.0001 LTC
 
 // Configuración de middlewares
 app.use(express.json()); // Middleware para parsear bodies de solicitud JSON
